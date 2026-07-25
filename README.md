@@ -22,6 +22,33 @@ The supported print flow is:
 3. Sync-load, purge, wipe, and start printing.
 4. On toolchange, cut, unload back to the sensor, clear the hub, load the next slot, push to the printhead, sync-load, purge, wipe, and resume.
 
+## TODO: CC1 Canvas Toolhead Sensor Migration
+
+Upstream predates the CC1 Canvas toolhead, which exposes a real filament switch at the
+extruder inlet (`hotend:PB2`) alongside cutter, front-cover, and feeding-pressure
+switches. The flow above reaches the printhead by blind-feeding
+`load_to_printhead_mm` (730mm) past the hub sensor and hoping the distance is right.
+With a toolhead sensor we can stop on the switch instead.
+
+- [x] Add a `toolhead_sensor_name` setting to `_ACE_CONFIG`. The macros pass the sensor name
+      through to `feed-to-sensor` on every call, so `ace-addon.conf` needs no new key.
+- [x] Replace the blind push in `_ACE_LOAD_TO_PRINTHEAD` with a bounded `feed-to-sensor`
+      search against the toolhead sensor, then a short push past it into the extruder gears.
+- [x] Keep the blind push as a fallback so printers without a toolhead sensor still work.
+- [x] Retract clear of the toolhead sensor before the long hub retract on toolchange and end-print.
+- [x] Verify the toolhead sensor reads clear after cut and unload, so a leftover stub in the
+      extruder can never be rammed by the next load.
+- [x] Update the `printer.cfg` example: `pause_on_runout: False` on the toolhead sensor and
+      route its events into `_ACE_SENSOR_EVENT`.
+- [ ] Measure the real hub-sensor-to-toolhead distance and tighten `load_to_toolhead_search_mm`
+      from the current 900mm guess.
+- [ ] Tune `load_past_toolhead_mm` (currently 15mm) so the filament reaches the extruder gears
+      without pushing into the melt zone cold.
+- [ ] Use `toolhead_cutter_detection` to confirm the cut actually engaged in `_ACE_CUT_FILAMENT`.
+- [ ] Use `toolhead_feeding_pressure_detection` to abort on a tangle instead of stalling.
+- [ ] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
+- [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
+
 ## Requirements
 An Elegoo Centauri Carbon and an Anycubic ACE Pro
 
@@ -93,7 +120,7 @@ You will need to either modify the 4-pin end of the ACE cable or build an adapte
 
 ## Required Printer Config
 
-Add this to your `printer.cfg`:
+The hub sensor, which the 4-way adapter mounts to, is required:
 
 ```cfg
 [filament_switch_sensor runout]
@@ -107,17 +134,41 @@ insert_gcode:
   _ACE_SENSOR_EVENT EVENT=INSERT
 ```
 
+On a post-Canvas CC1 toolhead, also wire up the sensor at the extruder inlet:
+
+```cfg
+[filament_switch_sensor toolhead_runout_sensor]
+switch_pin: !hotend:PB2
+pause_on_runout: False
+runout_gcode:
+  _ACE_SENSOR_EVENT EVENT=TOOLHEAD_RUNOUT
+insert_gcode:
+  _ACE_SENSOR_EVENT EVENT=TOOLHEAD_INSERT
+```
+
 Notes:
-- `pause_on_runout` must be `False`.
+- `pause_on_runout` must be `False` on both sensors. The ACE macros retract past them on
+  purpose, and Klipper's own pause handling would fight the toolchange.
 - The macro name must be `_ACE_SENSOR_EVENT`.
-- If your sensor object is not named `runout`, update `variable_sensor_name` in `ace-addon.cfg`.
+- If your sensor objects are not named `runout` and `toolhead_runout_sensor`, update
+  `variable_sensor_name` and `variable_toolhead_sensor_name` in `ace-addon.cfg`.
 
 ## Required Tuning
 
-The main tuning value in `ace-addon.cfg` is:
-- `variable_load_to_printhead_mm` (Default: `730`)
+With a toolhead sensor configured, loading stops on the switch rather than at a fixed
+distance, so the values that matter are:
 
-This is the distance from your filament sensor to the printhead. If too short, the filament won't reach; if too long, it will overfeed.
+- `variable_load_to_toolhead_search_mm` (Default: `900`) — upper bound on the search from the
+  hub sensor to the toolhead sensor. It only needs to exceed the real distance; overshoot
+  costs nothing because the feed stops when the switch trips.
+- `variable_load_past_toolhead_mm` (Default: `15`) — how far to push past the toolhead switch
+  to seat the filament in the extruder gears.
+- `variable_unload_from_toolhead_search_mm` (Default: `200`) — upper bound on the retract that
+  pulls the filament back off the toolhead switch.
+
+`variable_load_to_printhead_mm` (Default: `730`) is now only used as a blind-push fallback when
+`variable_toolhead_sensor_name` is empty or the named sensor does not exist. On those printers
+it is still the critical value: too short and the filament won't reach, too long and it overfeeds.
 
 ## Uninstall
 
