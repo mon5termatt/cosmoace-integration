@@ -50,7 +50,8 @@ With a toolhead sensor we can stop on the switch instead.
       by running `ACE_BLIND_CLEAR_HUB` while the hub sensor is still installed; the macro
       cross-checks the blind distance against the hub sensor whenever one is present.
 - [ ] Use `toolhead_cutter_detection` to confirm the cut actually engaged in `_ACE_CUT_FILAMENT`.
-- [ ] Use `toolhead_feeding_pressure_detection` to abort on a tangle instead of stalling.
+- ~~Use `toolhead_feeding_pressure_detection` to abort on a tangle~~ — dropped. That switch
+  only exists on the special toolhead hub, which this setup does not use.
 - [ ] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
 - [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
 
@@ -121,7 +122,46 @@ You will need this filament hub adapter which mounts to the Carbon Centauri's ru
 [Filament Hub Adapter (Printables)](https://www.printables.com/model/1662192-centauri-carbon-multi-material-filament-hub-4-colo)
 
 ### Modified ACE Cable
-You will need to either modify the 4-pin end of the ACE cable or build an adapter. Pins 3 and 4 need to be swapped.
+
+You need to either modify the 4-pin end of the ACE cable or build an adapter. **Pins 3 and 4
+must be swapped, and the 5V line should be left disconnected.**
+
+#### Why the swap
+
+The ACE Pro talks plain USB over that cable. Pins 3 and 4 are the USB **data pair** (`D+` and
+`D-`), and the ACE Pro has them reversed relative to the Centauri Carbon's port. Swapping them
+just corrects the data polarity so the host can enumerate the device. You are crossing two
+signal wires, not moving power around.
+
+#### Why 5V comes out
+
+The ACE Pro is powered entirely by **its own 24V supply**. It never draws its logic power from
+the printer's port, so the 5V wire does no work — but leaving it connected ties two
+independently powered 5V rails together. That invites current flowing between the two supplies
+whenever they sit at slightly different voltages, or whenever one side is powered and the other
+is not (printer off, ACE on, or the reverse). It is not a guaranteed failure, but it is exactly
+the kind of thing that stresses regulators and produces "only misbehaves depending on power-on
+order" faults. Since the wire buys you nothing, omit it.
+
+**Ground stays connected.** The data pair needs a common ground reference to work, so `GND` is
+required. It is only the 5V / VBUS line you leave out.
+
+#### Resulting wiring
+
+| Signal | Connect? | Notes |
+| --- | --- | --- |
+| `D+` | Yes | Swapped with `D-` (pins 3 / 4) |
+| `D-` | Yes | Swapped with `D+` (pins 3 / 4) |
+| `GND` | Yes | Required as the reference for the data pair |
+| `5V` | **No** | ACE runs on its own 24V brick |
+
+#### Use the front USB port
+
+Connect the ACE to the printer's **front USB port**. The rear MMU / AMS port appears to be
+disabled in firmware — people have repinned a cable correctly for it and still gotten no
+response, while the same cable works on the front port. See
+[OpenCentauri issue #27](https://github.com/OpenCentauri/OpenCentauri/issues/27) for the
+pinout discussion and reports.
 
 ## Required Printer Config
 
