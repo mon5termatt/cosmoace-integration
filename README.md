@@ -17,44 +17,41 @@ CosmoACE installs:
 - a Klipper macro set for blocking start, toolchange, and end-print flows
 
 The supported print flow is:
-1. Load the selected slot until the filament sensor triggers.
-2. Push from the sensor to the printhead by a configured distance.
+1. Load the selected slot to the hub sensor when one is configured.
+2. Continue until the toolhead sensor triggers, then seat the filament in the extruder.
 3. Sync-load, purge, wipe, and start printing.
-4. On toolchange, cut, unload back to the sensor, clear the hub, load the next slot, push to the printhead, sync-load, purge, wipe, and resume.
+4. On toolchange, cut, unload from the toolhead, clear the hub (sensor-confirmed or
+   fixed-distance), load the next slot, purge, wipe, and resume.
 
-## TODO: CC1 Canvas Toolhead Sensor Migration
+## TODO
 
-Upstream predates the CC1 Canvas toolhead, which exposes a real filament switch at the
-extruder inlet (`hotend:PB2`) alongside cutter, front-cover, and feeding-pressure
-switches. The flow above reaches the printhead by blind-feeding
-`load_to_printhead_mm` (730mm) past the hub sensor and hoping the distance is right.
-With a toolhead sensor we can stop on the switch instead.
+The CC1 Canvas toolhead-sensor migration and optional-hub flow are implemented. The
+remaining work is configuration, physical validation, and cleanup.
 
-- [x] Add a `toolhead_sensor_name` setting to `_ACE_CONFIG`. The macros pass the sensor name
-      through to `feed-to-sensor` on every call, so `ace-addon.conf` needs no new key.
-- [x] Replace the blind push in `_ACE_LOAD_TO_PRINTHEAD` with a bounded `feed-to-sensor`
-      search against the toolhead sensor, then a short push past it into the extruder gears.
-- [x] Keep the blind push as a fallback so printers without a toolhead sensor still work.
-- [x] Retract clear of the toolhead sensor before the long hub retract on toolchange and end-print.
-- [x] Verify the toolhead sensor reads clear after cut and unload, so a leftover stub in the
-      extruder can never be rammed by the next load.
-- [x] Update the `printer.cfg` example: `pause_on_runout: False` on the toolhead sensor and
-      route its events into `_ACE_SENSOR_EVENT`.
+### Configuration and calibration
+
 - [ ] Measure the real hub-sensor-to-toolhead distance and tighten `load_to_toolhead_search_mm`
       from the current 900mm guess.
 - [ ] Tune `load_past_toolhead_mm` (currently 15mm) so the filament reaches the extruder gears
       without pushing into the melt zone cold.
-- [x] (`nohub` branch) Make the hub sensor fully optional: loads search straight to the toolhead
-      sensor, unloads blind-retract past the merge point with `_ACE_BLIND_CLEAR_HUB`.
-- [ ] (`nohub` branch) Calibrate `unload_past_hub_mm` and `load_to_toolhead_full_search_mm`
-      by running `_ACE_BLIND_CLEAR_HUB` (or `ACE_BLIND_CLEAR_HUB` if the nohub panel include
-      is enabled) while the hub sensor is still installed; the macro
-      cross-checks the blind distance against the hub sensor whenever one is present.
-- [ ] Use `toolhead_cutter_detection` to confirm the cut actually engaged in `_ACE_CUT_FILAMENT`.
-- ~~Use `toolhead_feeding_pressure_detection` to abort on a tangle~~ — dropped. That switch
-  only exists on the special toolhead hub, which this setup does not use.
-- [x] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
+- [ ] Calibrate `unload_past_hub_mm` and `load_to_toolhead_full_search_mm` by running
+      `_ACE_BLIND_CLEAR_HUB` (or `ACE_BLIND_CLEAR_HUB` if the nohub panel include is
+      enabled) while the hub sensor is still installed; the macro cross-checks the blind
+      distance against the hub sensor whenever one is present.
+
+### Validation
+
 - [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
+- [ ] Test both supported configurations: toolhead-only and hub plus toolhead.
+- [ ] Verify the ACE reconnect and startup announcement after a full printer power cycle.
+
+### Cleanup and follow-up
+
+- [ ] Use `toolhead_cutter_detection` to confirm the cut engaged in `_ACE_CUT_FILAMENT`.
+- [ ] Remove obsolete blind-feed compatibility code after deciding whether pre-Canvas
+      toolheads still need support.
+- [ ] Consolidate repeated hub/toolhead sensor detection in `ace_macros.cfg`.
+- [ ] Add automated tests for `ace_macros_nohub_panel.cfg` and connection retries.
 
 ## Requirements
 An Elegoo Centauri Carbon and an Anycubic ACE Pro
@@ -216,8 +213,8 @@ whatever `/dev/ttyACM0` Klipper already owns.
 
 ## Required Printer Config
 
-On this branch (`nohub`) the hub sensor is optional. If you have one at the 4-way merge
-point, configure it — it gives immediate hub-clear confirmation on toolchanges:
+The hub sensor is optional. If you have one at the 4-way merge point, configure it — it
+gives immediate hub-clear confirmation on toolchanges:
 
 ```cfg
 [filament_switch_sensor runout]
