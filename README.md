@@ -44,6 +44,11 @@ With a toolhead sensor we can stop on the switch instead.
       from the current 900mm guess.
 - [ ] Tune `load_past_toolhead_mm` (currently 15mm) so the filament reaches the extruder gears
       without pushing into the melt zone cold.
+- [x] (`nohub` branch) Make the hub sensor fully optional: loads search straight to the toolhead
+      sensor, unloads blind-retract past the merge point with `ACE_BLIND_CLEAR_HUB`.
+- [ ] (`nohub` branch) Calibrate `unload_past_hub_mm` and `load_to_toolhead_full_search_mm`
+      by running `ACE_BLIND_CLEAR_HUB` while the hub sensor is still installed; the macro
+      cross-checks the blind distance against the hub sensor whenever one is present.
 - [ ] Use `toolhead_cutter_detection` to confirm the cut actually engaged in `_ACE_CUT_FILAMENT`.
 - [ ] Use `toolhead_feeding_pressure_detection` to abort on a tangle instead of stalling.
 - [ ] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
@@ -120,7 +125,8 @@ You will need to either modify the 4-pin end of the ACE cable or build an adapte
 
 ## Required Printer Config
 
-The hub sensor, which the 4-way adapter mounts to, is required:
+On this branch (`nohub`) the hub sensor is optional. If you have one at the 4-way merge
+point, configure it — it gives immediate hub-clear confirmation on toolchanges:
 
 ```cfg
 [filament_switch_sensor runout]
@@ -153,6 +159,26 @@ Notes:
 - If your sensor objects are not named `runout` and `toolhead_runout_sensor`, update
   `variable_sensor_name` and `variable_toolhead_sensor_name` in `ace-addon.cfg`.
 
+### Running without a hub sensor
+
+To go toolhead-sensor-only, remove the `[filament_switch_sensor runout]` section from
+`printer.cfg` entirely (or set `variable_sensor_name: ""` in `ace-addon.cfg`). Do not leave
+the section configured with the switch unplugged — a floating pin can read as permanently
+triggered and the macros will trust it.
+
+Without a hub sensor the flows change to:
+- Load: one bounded search from the ACE all the way to the toolhead sensor
+  (`load_to_toolhead_full_search_mm`, default 2200mm). If the sensor never trips, the load
+  aborts — a jam at the hub stalls the ACE against the blockage rather than grinding.
+- Unload: retract until the toolhead sensor clears, then `ACE_BLIND_CLEAR_HUB` retracts a
+  generous fixed distance (`unload_past_hub_mm`, default 950mm) to pull the tail back past
+  the merge point. Over-retracting is harmless; the ACE just spools the extra back.
+- Runout detection comes from the toolhead sensor.
+
+While your hub sensor is still installed, you can calibrate the blind distance safely:
+`ACE_BLIND_CLEAR_HUB` automatically verifies against the hub sensor whenever one exists,
+so a too-short `unload_past_hub_mm` fails loudly instead of jamming the next load.
+
 ## Required Tuning
 
 With a toolhead sensor configured, loading stops on the switch rather than at a fixed
@@ -165,6 +191,14 @@ distance, so the values that matter are:
   to seat the filament in the extruder gears.
 - `variable_unload_from_toolhead_search_mm` (Default: `200`) — upper bound on the retract that
   pulls the filament back off the toolhead switch.
+
+Hub-less setups additionally use:
+
+- `variable_load_to_toolhead_full_search_mm` (Default: `2200`) — search bound for the full
+  ACE-to-toolhead run when no hub sensor stages the load. Only needs to exceed the real
+  path length.
+- `variable_unload_past_hub_mm` (Default: `950`) — blind retract from the toolhead sensor back
+  past the merge point. Should comfortably exceed toolhead-to-hub distance; extra is harmless.
 
 `variable_load_to_printhead_mm` (Default: `730`) is now only used as a blind-push fallback when
 `variable_toolhead_sensor_name` is empty or the named sensor does not exist. On those printers

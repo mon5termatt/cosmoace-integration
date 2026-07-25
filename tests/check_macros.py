@@ -121,32 +121,48 @@ def build_printer(toolhead_present=True, hub=1, toolhead=0, hub_present=True):
     return printer
 
 
-# name, params, toolhead_present, hub_reading, toolhead_reading
+# name, params, toolhead_present, hub_reading, toolhead_reading, hub_present
 CASES = [
-    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_RUNOUT"}, True, 1, 0),
-    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_INSERT"}, True, 1, 1),
-    ("_ACE_SENSOR_EVENT", {"EVENT": "RUNOUT"}, True, 0, 0),
-    ("_ACE_SENSOR_EVENT", {"EVENT": "INSERT"}, True, 1, 0),
-    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_INSERT"}, False, 1, 0),
-    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, True, 1, 0),
-    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, False, 1, 0),
-    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 2}, True, 1, 0),
-    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 2}, True, 1, 1),
-    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 9}, True, 1, 0),
-    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, True, 1, 1),
-    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, True, 1, 0),
-    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, False, 1, 0),
-    ("_ACE_VERIFY_TOOLHEAD_TRIGGERED", {}, True, 1, 1),
-    ("_ACE_VERIFY_TOOLHEAD_TRIGGERED", {}, True, 1, 0),
-    ("_ACE_VERIFY_TOOLHEAD_CLEAR", {}, True, 1, 0),
-    ("_ACE_VERIFY_TOOLHEAD_CLEAR", {}, True, 1, 1),
-    ("ACE_STATUS", {}, True, 1, 1),
-    ("ACE_STATUS", {}, False, 1, 0),
-    ("_ACE_RESET_STATE", {}, True, 0, 0),
-    ("_ACE_RESET_STATE", {}, False, 0, 0),
-    ("_ACE_ORCA_START", {"SLOT": 2}, True, 0, 0),
-    ("_ACE_ORCA_TOOLCHANGE", {"SLOT": 2}, True, 1, 1),
-    ("_ACE_ORCA_END_PRINT", {}, True, 1, 1),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_RUNOUT"}, True, 1, 0, True),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_INSERT"}, True, 1, 1, True),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "RUNOUT"}, True, 0, 0, True),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "INSERT"}, True, 1, 0, True),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_INSERT"}, False, 1, 0, True),
+    ("_ACE_SENSOR_EVENT", {"EVENT": "TOOLHEAD_RUNOUT"}, True, 0, 0, False),
+    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, True, 1, 0, True),
+    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, False, 1, 0, True),
+    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, True, 0, 0, False),
+    ("_ACE_LOAD_TO_PRINTHEAD", {"SLOT": 2}, False, 0, 0, False),
+    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 2}, True, 1, 0, True),
+    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 2}, True, 1, 1, True),
+    ("_ACE_LOAD_TO_TOOLHEAD", {"SLOT": 9}, True, 1, 0, True),
+    ("_ACE_LOAD_TO_SENSOR", {"SLOT": 2}, True, 0, 0, False),
+    ("_ACE_UNLOAD_TO_SENSOR", {"SLOT": 1}, True, 0, 0, False),
+    ("_ACE_CLEAR_HUB", {"SLOT": 1}, True, 0, 0, False),
+    ("_ACE_BLIND_CLEAR_HUB", {"SLOT": 1}, True, 0, 0, False),
+    ("_ACE_BLIND_CLEAR_HUB", {"SLOT": 1}, True, 0, 1, False),
+    ("_ACE_BLIND_CLEAR_HUB", {"SLOT": 1}, True, 1, 0, True),
+    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, True, 1, 1, True),
+    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, True, 1, 0, True),
+    ("_ACE_UNLOAD_FROM_TOOLHEAD", {"SLOT": 1}, False, 1, 0, True),
+    ("_ACE_VERIFY_TOOLHEAD_TRIGGERED", {}, True, 1, 1, True),
+    ("_ACE_VERIFY_TOOLHEAD_TRIGGERED", {}, True, 1, 0, True),
+    ("_ACE_VERIFY_TOOLHEAD_CLEAR", {}, True, 1, 0, True),
+    ("_ACE_VERIFY_TOOLHEAD_CLEAR", {}, True, 1, 1, True),
+    ("_ACE_REPORT_SENSOR_OUT", {"SLOT": 1}, True, 0, 0, False),
+    ("_ACE_REPORT_SENSOR_IN", {"SLOT": 1}, True, 0, 0, False),
+    ("ACE_STATUS", {}, True, 1, 1, True),
+    ("ACE_STATUS", {}, False, 1, 0, True),
+    ("ACE_STATUS", {}, True, 0, 0, False),
+    ("_ACE_RESET_STATE", {}, True, 0, 0, True),
+    ("_ACE_RESET_STATE", {}, False, 0, 0, True),
+    ("_ACE_RESET_STATE", {}, True, 0, 0, False),
+    ("_ACE_ORCA_START", {"SLOT": 2}, True, 0, 0, True),
+    ("_ACE_ORCA_START", {"SLOT": 2}, True, 0, 0, False),
+    ("_ACE_ORCA_TOOLCHANGE", {"SLOT": 2}, True, 1, 1, True),
+    ("_ACE_ORCA_TOOLCHANGE", {"SLOT": 2}, True, 0, 1, False),
+    ("_ACE_ORCA_END_PRINT", {}, True, 1, 1, True),
+    ("_ACE_ORCA_END_PRINT", {}, True, 0, 1, False),
 ]
 
 
@@ -154,17 +170,18 @@ def render_cases():
     parser = load(MACROS)
     env = klipper_env()
     failures = []
-    for name, params, toolhead_present, hub, toolhead in CASES:
+    for name, params, toolhead_present, hub, toolhead, hub_present in CASES:
         template = env.from_string(parser.get(f"gcode_macro {name}", "gcode"))
         label = (
             f"{name} params={params} "
+            f"hub_cfg={'yes' if hub_present else 'no'} "
             f"toolhead_cfg={'yes' if toolhead_present else 'no'} hub={hub} th={toolhead}"
         )
         try:
             out = template.render(
                 params=params,
                 rawparams="",
-                printer=build_printer(toolhead_present, hub, toolhead),
+                printer=build_printer(toolhead_present, hub, toolhead, hub_present),
                 action_raise_error=raise_error,
                 action_respond_info=lambda m: "",
                 action_emergency_stop=lambda m="": "",
@@ -182,14 +199,14 @@ def render_cases():
     return failures
 
 
-def dump(name):
+def dump(name, hub_present=True):
     parser = load(MACROS)
     env = klipper_env()
     template = env.from_string(parser.get(f"gcode_macro {name}", "gcode"))
     out = template.render(
         params={"SLOT": 2},
         rawparams="",
-        printer=build_printer(True, 1, 1),
+        printer=build_printer(True, 1 if hub_present else 0, 1, hub_present),
         action_raise_error=raise_error,
         action_respond_info=lambda m: "",
     )
@@ -201,7 +218,7 @@ def dump(name):
 
 def main():
     if len(sys.argv) > 2 and sys.argv[1] == "--dump":
-        return dump(sys.argv[2])
+        return dump(sys.argv[2], hub_present="nohub" not in sys.argv[3:])
 
     failures = []
     for path in (MACROS, PRINTER_CFG):
