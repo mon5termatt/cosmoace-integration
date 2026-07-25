@@ -45,14 +45,15 @@ With a toolhead sensor we can stop on the switch instead.
 - [ ] Tune `load_past_toolhead_mm` (currently 15mm) so the filament reaches the extruder gears
       without pushing into the melt zone cold.
 - [x] (`nohub` branch) Make the hub sensor fully optional: loads search straight to the toolhead
-      sensor, unloads blind-retract past the merge point with `ACE_BLIND_CLEAR_HUB`.
+      sensor, unloads blind-retract past the merge point with `_ACE_BLIND_CLEAR_HUB`.
 - [ ] (`nohub` branch) Calibrate `unload_past_hub_mm` and `load_to_toolhead_full_search_mm`
-      by running `ACE_BLIND_CLEAR_HUB` while the hub sensor is still installed; the macro
+      by running `_ACE_BLIND_CLEAR_HUB` (or `ACE_BLIND_CLEAR_HUB` if the nohub panel include
+      is enabled) while the hub sensor is still installed; the macro
       cross-checks the blind distance against the hub sensor whenever one is present.
 - [ ] Use `toolhead_cutter_detection` to confirm the cut actually engaged in `_ACE_CUT_FILAMENT`.
 - ~~Use `toolhead_feeding_pressure_detection` to abort on a tangle~~ — dropped. That switch
   only exists on the special toolhead hub, which this setup does not use.
-- [ ] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
+- [x] Refresh the config table and macro list in `docs/ACE_MACROS.md`.
 - [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
 
 ## Requirements
@@ -102,11 +103,19 @@ If you prefer to install manually or the script encounters issues with your spec
    cp files/ace-command.sh /user-resource/ace-addon/
    cp files/ace-addon.conf /user-resource/ace-addon/
    cp files/ace_macros.cfg /etc/klipper/config/ace-addon.cfg
+   # Hub-less only: expose ACE_BLIND_CLEAR_HUB on the Mainsail panel
+   # cp files/ace_macros_nohub_panel.cfg /etc/klipper/config/
    ```
 4. **Set Permissions & Symlink:**
    ```sh
    chmod +x /user-resource/ace-addon/*.sh /user-resource/ace-addon/*.py
    ln -sfn /etc/klipper/config/ace-addon.cfg /etc/klipper/config/klipper-readonly/ace-addon.cfg
+   ```
+   If you installed `ace_macros_nohub_panel.cfg` (hub-less), add this to `ace-addon.cfg`
+   (or your printer config) so the panel button is loaded — **do not** add it when a
+   hub sensor is enabled, or the nohub button will show up in Mainsail:
+   ```cfg
+   [include /etc/klipper/config/ace_macros_nohub_panel.cfg]
    ```
 5. **Remount as Read-Only:**
    ```sh
@@ -121,47 +130,89 @@ If you prefer to install manually or the script encounters issues with your spec
 You will need this filament hub adapter which mounts to the Carbon Centauri's run-out sensor:
 [Filament Hub Adapter (Printables)](https://www.printables.com/model/1662192-centauri-carbon-multi-material-filament-hub-4-colo)
 
-### Modified ACE Cable
+### ACE Cable (rear AMS / MMU port)
 
-You need to either modify the 4-pin end of the ACE cable or build an adapter. **Pins 3 and 4
-must be swapped, and the 5V line should be left disconnected.**
+This project targets the Centauri Carbon **rear AMS / MMU port**.
 
-#### Why the swap
+There are two different connectors in this path — do not confuse them:
 
-The ACE Pro talks plain USB over that cable. Pins 3 and 4 are the USB **data pair** (`D+` and
-`D-`), and the ACE Pro has them reversed relative to the Centauri Carbon's port. Swapping them
-just corrects the data polarity so the host can enumerate the device. You are crossing two
-signal wires, not moving power around.
+| Connector | Pins | Where |
+| --- | ---: | --- |
+| External rear port (chassis) | **4-pin** | What you plug the ACE signal cable into |
+| Board connector (mainboard side) | **5-pin** | Internal harness from the rear port to the board |
 
-#### Why 5V comes out
+The ACE modification is done on the **board connector / harness**, not by inventing a
+5-pin external rear jack.
 
-The ACE Pro is powered entirely by **its own 24V supply**. It never draws its logic power from
-the printer's port, so the 5V wire does no work — but leaving it connected ties two
-independently powered 5V rails together. That invites current flowing between the two supplies
-whenever they sit at slightly different voltages, or whenever one side is powered and the other
-is not (printer off, ACE on, or the reverse). It is not a guaranteed failure, but it is exactly
-the kind of thing that stresses regulators and produces "only misbehaves depending on power-on
-order" faults. Since the wire buys you nothing, omit it.
+#### Required ACE signal cable
 
-**Ground stays connected.** The data pair needs a common ground reference to work, so `GND` is
-required. It is only the 5V / VBUS line you leave out.
+> [!WARNING]
+> You must use the ACE Pro's **4-pin-to-6-pin signal cable**. The **6-pin end plugs
+> into the ACE Pro**. The **4-pin end plugs into the Centauri's external rear AMS
+> port**. A 4-pin-to-4-pin cable does not connect to the ACE Pro's USB interface.
 
-#### Resulting wiring
+The 4-pin end of the ACE signal cable uses this pinout
+([DuckACE](https://github.com/utkabobr/DuckACE) /
+[ValgACE](https://github.com/agrloki/ValgACE)):
 
-| Signal | Connect? | Notes |
-| --- | --- | --- |
-| `D+` | Yes | Swapped with `D-` (pins 3 / 4) |
-| `D-` | Yes | Swapped with `D+` (pins 3 / 4) |
-| `GND` | Yes | Required as the reference for the data pair |
-| `5V` | **No** | ACE runs on its own 24V brick |
+| Cable pin | Signal |
+| ---: | --- |
+| 1 | VCC / 5V — leave disconnected at the ACE end of any DIY adapter |
+| 2 | GND |
+| 3 | D- |
+| 4 | D+ |
 
-#### Use the front USB port
+On a normal USB host (Pi, Voron, CosmOS **front** USB), map these straight across and
+leave VCC off. No swap.
 
-Connect the ACE to the printer's **front USB port**. The rear MMU / AMS port appears to be
-disabled in firmware — people have repinned a cable correctly for it and still gotten no
-response, while the same cable works on the front port. See
-[OpenCentauri issue #27](https://github.com/OpenCentauri/OpenCentauri/issues/27) for the
-pinout discussion and reports.
+#### Board connector pinout (Centauri Carbon, 5-pin)
+
+The internal board-side connector is **5-pin**:
+
+| Board pin | Marking | Signal | Notes |
+| ---: | --- | --- | --- |
+| 1 | 24V | +24V | 24V for motors inside a native MMU / Canvas AMS |
+| 2 | GND | GND | |
+| 3 | 5V | +5V | Can be toggled off to reset the MMU's MCU |
+| 4 | DM | USB D- | Marked D- |
+| 5 | DP | USB D+ | Marked D+ |
+
+#### Board harness mod for CosmoACE
+
+The ACE has its own 24V brick, so treat this as a USB data path only. On the
+**board connector / harness**:
+
+1. **Swap the two data wires** (board pin 4 ↔ pin 5 / marked `DM` ↔ `DP`).
+2. **Disconnect the 5V wire (board pin 3)** and **cap / isolate it** so it cannot
+   short or back-feed.
+3. Leave **24V (board pin 1) unused** for the ACE — do not feed it into the ACE.
+4. Keep **GND** connected.
+
+Confirmed with the ACE on CosmOS: straight-through data polarity made Linux see a
+false low-speed device and fail enumeration with USB `error -32`. Crossing `DM`/`DP`
+on the board harness is required.
+
+> [!CAUTION]
+> **This board-harness mod breaks Canvas / native AMS compatibility.**
+>
+> After you swap the data lines (and cap 5V) for CosmoACE, a stock Canvas AMS /
+> Anycubic multi-material unit will **not** work on the rear port until you reverse
+> the data-wire swap (and restore 5V if that unit needs it).
+>
+> If you ever go back to Canvas, you **must swap the data cables back** first. Do not
+> leave the CosmoACE polarity in place and expect Canvas to enumerate.
+
+#### Front-USB fallback
+
+If the ACE still does not enumerate after the board-harness swap, verify that the ACE
+is independently powered, reseat the **6-pin** connector on the ACE, and check
+continuity. As a sanity check, test the ACE on CosmOS **front USB** with a standard
+**non-swapped** DuckACE adapter.
+
+A working connect must show a **second** serial device besides the Klipper MCU
+(`usb-Klipper_stm32...`). Point `ace-addon.conf` `serial_port` at the ACE device, not at
+whatever `/dev/ttyACM0` Klipper already owns.
+
 
 ## Required Printer Config
 
@@ -210,14 +261,17 @@ Without a hub sensor the flows change to:
 - Load: one bounded search from the ACE all the way to the toolhead sensor
   (`load_to_toolhead_full_search_mm`, default 2200mm). If the sensor never trips, the load
   aborts — a jam at the hub stalls the ACE against the blockage rather than grinding.
-- Unload: retract until the toolhead sensor clears, then `ACE_BLIND_CLEAR_HUB` retracts a
+- Unload: retract until the toolhead sensor clears, then `_ACE_BLIND_CLEAR_HUB` retracts a
   generous fixed distance (`unload_past_hub_mm`, default 950mm) to pull the tail back past
   the merge point. Over-retracting is harmless; the ACE just spools the extra back.
 - Runout detection comes from the toolhead sensor.
+- Panel button: copy `ace_macros_nohub_panel.cfg` and `[include]` it to expose
+  `ACE_BLIND_CLEAR_HUB` in Mainsail. Leave that include **out** when a hub sensor is
+  enabled so the nohub button stays hidden.
 
 While your hub sensor is still installed, you can calibrate the blind distance safely:
-`ACE_BLIND_CLEAR_HUB` automatically verifies against the hub sensor whenever one exists,
-so a too-short `unload_past_hub_mm` fails loudly instead of jamming the next load.
+`_ACE_BLIND_CLEAR_HUB` verifies against the hub sensor whenever one exists, so a too-short
+`unload_past_hub_mm` fails loudly instead of jamming the next load.
 
 ## Required Tuning
 

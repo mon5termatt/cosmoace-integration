@@ -7,7 +7,7 @@ ACE_CONFIG="${ACE_ADDON_CONFIG:-/user-resource/ace-addon/ace-addon.conf}"
 
 usage() {
     echo "Usage: $0 <cmd> [args...]"
-    echo "Commands: feed, feed-wait, retract, retract-wait, feed-to-sensor, retract-to-sensor, wait-motion, clear-hub, stop, stop-unwind, dry-start, dry-stop, status, status-refresh, slot-status, assert-slot-ready, set-serial, debug-cli"
+    echo "Commands: feed, feed-wait, retract, retract-wait, feed-to-sensor, retract-to-sensor, wait-motion, clear-hub, stop, stop-unwind, dry-start, dry-stop, health, announce-connect, status, status-refresh, slot-status, assert-slot-ready, set-serial, debug-cli"
     exit 1
 }
 
@@ -78,6 +78,16 @@ case "${cmd}" in
         ;;
     dry-stop)
         run_python_cmd "dry_stop"
+        ;;
+    health)
+        run_python_cmd "health"
+        ;;
+    announce-connect)
+        # announce-connect [timeout_s]
+        args=""
+        [ -n "${2:-}" ] && [ "$2" != "0" ] && args="${args} --timeout_s $2"
+        # shellcheck disable=SC2086
+        run_python_cmd "announce_connect" ${args}
         ;;
     status)
         "${PYTHON_BIN}" "${ACE_SCRIPT}" --config "${ACE_CONFIG}" status

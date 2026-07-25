@@ -32,6 +32,18 @@ def read_text(path: str, default: str = "") -> str:
 
 
 class AceTransport:
+    # RPC methods that are safe to resend even if the first request may have
+    # reached the ACE. Motion commands (feed/unwind) are excluded: resending
+    # them after a lost reply could double the movement.
+    IDEMPOTENT_METHODS = {
+        "get_status",
+        "get_info",
+        "stop_feed_filament",
+        "stop_unwind_filament",
+        "drying",
+        "drying_stop",
+    }
+
     def __init__(self, cfg: configparser.ConfigParser) -> None:
         self.port = cfg.get("ace", "serial_port", fallback="auto").strip() or "auto"
         self.baudrate = cfg.getint("ace", "baudrate", fallback=115200)
@@ -39,6 +51,10 @@ class AceTransport:
         self.rpc_timeout_s = cfg.getfloat("ace", "rpc_timeout_s", fallback=5.0)
         self.read_idle_s = cfg.getfloat("ace", "read_idle_s", fallback=0.08)
         self.read_max_bytes = cfg.getint("ace", "read_max_bytes", fallback=4096)
+        self.connect_retries = cfg.getint("ace", "connect_retries", fallback=5)
+        self.connect_retry_delay_s = cfg.getfloat("ace", "connect_retry_delay_s", fallback=1.0)
+        self.rpc_retries = cfg.getint("ace", "rpc_retries", fallback=2)
+        self.rpc_retry_delay_s = cfg.getfloat("ace", "rpc_retry_delay_s", fallback=1.0)
         self._resolved_port: Optional[str] = None
         self._ser = None
         self._io_lock = threading.Lock()
@@ -125,12 +141,8 @@ class AceTransport:
         candidates = []
         seen = set()
 
-        for path in sorted(glob.glob("/dev/serial/by-id/*")):
-            real = os.path.realpath(path)
-            candidates.append({"path": path, "realpath": real, "source": "by-id"})
-            seen.add(path)
-            seen.add(real)
-
+        # Original CosmoACE order: real tty nodes first (what the ACE actually
+        # presents as), then by-id aliases for reporting.
         for pattern in ["/dev/ttyACM*", "/dev/ttyUSB*"]:
             for path in sorted(glob.glob(pattern)):
                 real = os.path.realpath(path)
@@ -139,6 +151,14 @@ class AceTransport:
                 candidates.append({"path": path, "realpath": real, "source": "glob"})
                 seen.add(path)
                 seen.add(real)
+
+        for path in sorted(glob.glob("/dev/serial/by-id/*")):
+            real = os.path.realpath(path)
+            if path in seen or real in seen:
+                continue
+            candidates.append({"path": path, "realpath": real, "source": "by-id"})
+            seen.add(path)
+            seen.add(real)
 
         klipper_ports = self._klipper_serial_ports()
         report = []
@@ -167,6 +187,8 @@ class AceTransport:
         }
 
     def _resolve_target_port(self) -> Optional[str]:
+        # Same as original CosmoACE: explicit path, or auto = first free
+        # non-Klipper tty/by-id candidate. No globs, no waiting.
         if self.port.lower() != "auto":
             self._resolved_port = self.port
             return self._resolved_port
@@ -179,13 +201,17 @@ class AceTransport:
         self._resolved_port = str(free[0])
         return self._resolved_port
 
-    def connect(self, retries: int = 5, retry_delay_s: float = 1.0) -> bool:
+    def connect(self, retries: Optional[int] = None, retry_delay_s: Optional[float] = None) -> bool:
         if serial is None:
             self.last_error = "pyserial is not available"
             return False
         if self._ser and self._ser.is_open:
             return True
 
+        retries = self.connect_retries if retries is None else retries
+        retry_delay_s = self.connect_retry_delay_s if retry_delay_s is None else retry_delay_s
+
+        # BunnyACE / original CosmoACE: open the resolved path, sleep, retry.
         for attempt in range(retries + 1):
             target_port = self._resolve_target_port()
             if target_port:
@@ -202,13 +228,13 @@ class AceTransport:
                 except (serial.SerialException, OSError) as exc:
                     err_str = str(exc)
                     if "No such device" in err_str or "[Errno 19]" in err_str:
-                        time.sleep(2.0)
+                        time.sleep(0.5)
                     self.last_error = f"connect failed: {exc}"
                     self._ser = None
-            
+
             if attempt < retries:
                 time.sleep(retry_delay_s)
-        
+
         return False
 
     def disconnect(self) -> None:
@@ -366,6 +392,43 @@ class AceTransport:
     def rpc_call(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not method:
             return {"ok": False, "error": "rpc method required"}
+
+        idempotent = method in self.IDEMPOTENT_METHODS
+        last_failure: Dict[str, Any] = {"ok": False, "error": "rpc not attempted"}
+
+        for attempt in range(self.rpc_retries + 1):
+            result = self._rpc_call_once(method, params)
+            if result.get("ok", False):
+                if attempt > 0:
+                    result["retried"] = attempt
+                return result
+            last_failure = result
+
+            # An ACE-level error code is a real answer from the device, not a
+            # transport failure; retrying will not change it.
+            if result.get("response") is not None:
+                return result
+            # If the request may have reached the ACE, only idempotent
+            # methods are safe to resend.
+            if result.get("request_sent", False) and not idempotent:
+                return result
+
+            if attempt < self.rpc_retries:
+                logging.warning(
+                    "rpc %s attempt %d/%d failed (%s); reconnecting and retrying",
+                    method,
+                    attempt + 1,
+                    self.rpc_retries + 1,
+                    result.get("error"),
+                )
+                self.disconnect()
+                time.sleep(self.rpc_retry_delay_s)
+
+        if self.rpc_retries > 0:
+            last_failure["retries_exhausted"] = self.rpc_retries
+        return last_failure
+
+    def _rpc_call_once(self, method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         if not self.connect():
             return {"ok": False, "error": self.last_error or "not connected"}
         assert self._ser is not None
@@ -376,20 +439,22 @@ class AceTransport:
         payload = json.dumps(req, separators=(",", ":")).encode("utf-8")
         frame = self._build_frame(payload)
 
+        request_sent = False
         with self._io_lock:
             try:
                 self._ser.write(frame)
                 self._ser.flush()
+                request_sent = True
                 self.last_tx_hex = frame.hex()
                 self.last_tx = self._bytes_to_ascii_safe(payload)
                 self.last_seen_unix = time.time()
                 response = self._read_matching_response(int(req["id"]), self.rpc_timeout_s)
                 if not response.get("ok", False):
                     self.last_error = str(response.get("error", "rpc read failed"))
-                    return {"ok": False, "error": self.last_error}
+                    return {"ok": False, "error": self.last_error, "request_sent": request_sent}
                 parsed = response.get("response")
                 if not isinstance(parsed, dict):
-                    return {"ok": False, "error": "rpc response is not a JSON object"}
+                    return {"ok": False, "error": "rpc response is not a JSON object", "request_sent": request_sent}
                 ace_error = AceController._rpc_code_error(method, parsed)
                 if ace_error:
                     self.last_error = ace_error
@@ -398,13 +463,14 @@ class AceTransport:
                         "error": ace_error,
                         "request": req,
                         "response": parsed,
+                        "request_sent": request_sent,
                     }
                 self.last_error = None
                 return {"ok": True, "request": req, "response": parsed}
             except Exception as exc:
                 self.last_error = f"rpc failed: {exc}"
                 self.disconnect()
-                return {"ok": False, "error": self.last_error}
+                return {"ok": False, "error": self.last_error, "request_sent": request_sent}
 
     def reconfigure(self, port: Optional[str], baudrate: Optional[int]) -> Dict[str, Any]:
         if port:
@@ -634,6 +700,130 @@ class AceController:
         if code_int is not None:
             return f"{method} failed with ACE code {code_int}: {detail}"
         return f"{method} failed: {detail}"
+
+    def _check_health(self) -> Dict[str, Any]:
+        """Round-trip check: connect and complete a get_status RPC.
+
+        Relies on the transport's connect and RPC retries, so a briefly
+        bouncing USB link still passes if it recovers within the retry window.
+        """
+        started = time.time()
+        status_result = self._get_ace_status(refresh=True)
+        elapsed_ms = int((time.time() - started) * 1000.0)
+        transport = self.transport.status()
+        if not status_result.get("ok", False):
+            return {
+                "ok": False,
+                "error": status_result.get("error", "ACE health check failed"),
+                "elapsed_ms": elapsed_ms,
+                "serial_port": transport.get("serial_port"),
+                "connected": transport.get("connected"),
+                "last_error": transport.get("last_error"),
+            }
+        status = status_result.get("status")
+        summary: Dict[str, Any] = {}
+        if isinstance(status, dict):
+            summary = {
+                "status": status.get("status"),
+                "action": status.get("action"),
+                "temp": status.get("temp"),
+                "dryer_status": status.get("dryer_status"),
+            }
+            slots = status.get("slots")
+            if isinstance(slots, list):
+                summary["slots"] = [
+                    str(s.get("status", "?")) if isinstance(s, dict) else "?" for s in slots
+                ]
+        return {
+            "ok": True,
+            "elapsed_ms": elapsed_ms,
+            "serial_port": transport.get("serial_port"),
+            "connected": True,
+            "ace": summary,
+        }
+
+    def _get_device_info(self) -> Dict[str, Any]:
+        """Best-effort get_info for the BunnyACE-style connect banner."""
+        result = self.transport.rpc_call("get_info")
+        if not result.get("ok", False):
+            return {}
+        parsed = result.get("response")
+        if not isinstance(parsed, dict):
+            return {}
+        info = parsed.get("result")
+        return info if isinstance(info, dict) else {}
+
+    def _announce_connect(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """BunnyACE-style connect banner after a successful open + get_info.
+
+        BunnyACE does:
+          self.gcode.respond_info('Connected ' + model + ' ' + firmware)
+        after the first get_info reply. We do the same once the serial port
+        opens and get_info (or get_status) succeeds.
+        """
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        timeout_s = _float(params if "timeout_s" in params else payload, "timeout_s", 30.0)
+        started = time.time()
+        deadline = started + max(5.0, timeout_s)
+        last_error = "waiting for ACE"
+
+        logging.info("ACE announce-connect: waiting up to %.0fs (BunnyACE-style)", timeout_s)
+
+        while time.time() < deadline:
+            if not self.transport.connect():
+                last_error = self.transport.last_error or "connect failed"
+                time.sleep(0.5)
+                continue
+
+            info = self._get_device_info()
+            model = str(info.get("model") or "").strip()
+            firmware = str(info.get("firmware") or info.get("version") or "").strip()
+
+            # Fall back to get_status if get_info is unavailable on this unit.
+            if not model:
+                health = self._check_health()
+                if not health.get("ok", False):
+                    last_error = str(health.get("error") or "health check failed")
+                    self.transport.disconnect()
+                    time.sleep(0.5)
+                    continue
+                model = "Anycubic ACE"
+            else:
+                # Confirm the link with a status round-trip too.
+                health = self._check_health()
+                if not health.get("ok", False):
+                    last_error = str(health.get("error") or "health check failed")
+                    self.transport.disconnect()
+                    time.sleep(0.5)
+                    continue
+
+            port = str(
+                health.get("serial_port")
+                or self.transport.status().get("serial_port")
+                or self.transport._resolved_port
+                or "?"
+            )
+            banner = f"ACE: Connected {model}"
+            if firmware:
+                banner = f"{banner} {firmware}"
+            banner = f"{banner} (port={port})"
+            print(banner, flush=True)
+            logging.info(banner)
+            return {
+                "ok": True,
+                "message": banner,
+                "model": model,
+                "firmware": firmware,
+                "serial_port": port,
+                "elapsed_ms": int((time.time() - started) * 1000.0),
+                "ace": health.get("ace"),
+            }
+
+        return {
+            "ok": False,
+            "error": f"ACE did not connect within {timeout_s:.0f}s ({last_error})",
+            "elapsed_ms": int((time.time() - started) * 1000.0),
+        }
 
     def _get_ace_status(self, refresh: bool = True) -> Dict[str, Any]:
         if not refresh and isinstance(self.last_ace_status, dict):
@@ -1215,6 +1405,10 @@ class AceController:
             )
         elif cmd == "dry_stop":
             result = self.transport.rpc_call("drying_stop")
+        elif cmd == "health":
+            result = self._check_health()
+        elif cmd == "announce_connect":
+            result = self._announce_connect(payload)
         elif cmd == "status_refresh":
             result = self._get_ace_status(refresh=True)
         elif cmd == "slot_status":
@@ -1345,7 +1539,11 @@ def run_command(config_path: str, payload: Dict[str, Any]) -> int:
     controller = AceController(cfg)
     try:
         result = controller.execute(payload)
-        emit_json(result, always=False)
+        # Health output is informational, so always show it.
+        emit_json(
+            result,
+            always=str(payload.get("cmd", "")).strip().lower() in {"health", "announce_connect"},
+        )
         return 0 if result.get("ok", False) else 1
     finally:
         controller.close()
@@ -1372,7 +1570,7 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="action")
 
     command_parser = subparsers.add_parser("command", help="Send one ACE command")
-    command_parser.add_argument("--cmd", required=True, help="feed|feed_wait|retract|retract_wait|feed_to_sensor|retract_to_sensor|wait_motion|clear_hub|stop|stop_unwind|dry_start|dry_stop|status_refresh|slot_status|assert_slot_ready|raw_method|set_serial")
+    command_parser.add_argument("--cmd", required=True, help="feed|feed_wait|retract|retract_wait|feed_to_sensor|retract_to_sensor|wait_motion|clear_hub|stop|stop_unwind|dry_start|dry_stop|health|announce_connect|status_refresh|slot_status|assert_slot_ready|raw_method|set_serial")
     command_parser.add_argument("--slot", type=int, default=None, help="ACE user slot 1..4")
     command_parser.add_argument("--mm", type=int, default=None)
     command_parser.add_argument("--speed", type=int, default=None)

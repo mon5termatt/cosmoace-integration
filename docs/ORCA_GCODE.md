@@ -5,7 +5,7 @@ Use these macros in OrcaSlicer or a PrusaSlicer-style fork.
 CosmoACE is designed for a blocking multicolor flow:
 
 1. Start on the selected slot.
-2. On color change, unload the current slot, clear the hub, load the next slot, push to the printhead, sync-load, purge, wipe, and resume.
+2. On color change, unload the current slot off the toolhead sensor, clear the hub (sensor-verified, or blind if you have no hub sensor), load the next slot to the toolhead sensor, sync-load, purge, wipe, and resume.
 3. On end print, clear the active slot and reset ACE state.
 
 ## Start G-Code
@@ -72,7 +72,9 @@ M84
 
 ## Required Printer Setup
 
-Your printer config needs the filament sensor to call:
+Your printer config needs each installed filament sensor to call the ACE event hook.
+
+Hub sensor (optional):
 
 ```cfg
 runout_gcode:
@@ -81,8 +83,13 @@ insert_gcode:
   _ACE_SENSOR_EVENT EVENT=INSERT
 ```
 
-If your sensor object is not named `runout`, update `variable_sensor_name` in `/etc/klipper/config/ace-addon.cfg` or call:
+Toolhead sensor (post-Canvas CC1):
 
-```gcode
-ACE_SET_SENSOR_NAME NAME=your_sensor_name
+```cfg
+runout_gcode:
+  _ACE_SENSOR_EVENT EVENT=TOOLHEAD_RUNOUT
+insert_gcode:
+  _ACE_SENSOR_EVENT EVENT=TOOLHEAD_INSERT
 ```
+
+If your sensor objects use different names, update `variable_sensor_name` and `variable_toolhead_sensor_name` in `/etc/klipper/config/ace-addon.cfg`, or call `ACE_SET_SENSOR_NAME NAME=your_sensor_name` for the hub sensor. Set a name variable to `""` if that sensor is not installed. See `docs/ACE_MACROS.md` for the full reference.
