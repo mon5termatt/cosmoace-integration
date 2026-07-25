@@ -15,6 +15,8 @@ tar -C "${SCRIPT_DIR}" -czf "${DIST_DIR}/${PKG}" \
     files/ace-addon.py \
     files/ace-addon.conf \
     files/ace-command.sh \
+    files/ace-addon.init \
+    files/ace-usb-watch.sh \
     files/ace_macros.cfg \
 
 echo "Created ${DIST_DIR}/${PKG}"

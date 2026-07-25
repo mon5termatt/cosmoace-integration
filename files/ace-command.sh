@@ -36,8 +36,6 @@ case "${cmd}" in
         run_python_cmd "retract_wait" --slot "${2:-1}" --mm "${3:-0}" --speed "${4:-0}" --timeout_s "${5:-0}"
         ;;
     feed-to-sensor)
-        # feed-to-sensor <slot> <mm> <speed> <sensor> <timeout> <settle_timeout> <confirm_s>
-        # Using --params-json for complex mapping
         params="{\"slot\":${2:-1},\"mm\":${3:-1200},\"speed\":${4:-25}"
         [ -n "${5:-}" ] && [ "$5" != "0" ] && params="${params},\"sensor\":\"$5\""
         [ -n "${6:-}" ] && [ "$6" != "0" ] && params="${params},\"timeout_s\":$6"
@@ -59,7 +57,6 @@ case "${cmd}" in
         run_python_cmd "wait_motion" --slot "${2:-1}" --timeout_s "${3:-5}"
         ;;
     clear-hub)
-        # clear-hub <slot> <mm> <step_mm> <max_extra_mm> <speed> <sensor> <settle_s> <confirm_s>
         params="{\"slot\":${2:-1},\"mm\":${3:-90},\"step_mm\":${4:-10},\"max_extra_mm\":${5:-60},\"speed\":${6:-15}"
         [ -n "${7:-}" ] && [ "$7" != "0" ] && params="${params},\"sensor\":\"$7\""
         [ -n "${8:-}" ] && [ "$8" != "0" ] && params="${params},\"settle_s\":$8"
@@ -83,7 +80,6 @@ case "${cmd}" in
         run_python_cmd "health"
         ;;
     announce-connect)
-        # announce-connect [timeout_s]
         args=""
         [ -n "${2:-}" ] && [ "$2" != "0" ] && args="${args} --timeout_s $2"
         # shellcheck disable=SC2086

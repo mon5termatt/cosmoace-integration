@@ -13,13 +13,18 @@ This document lists the macros in `files/ace_macros.cfg`, what each one does, an
 ## Connection Reliability
 
 The ACE's USB link is known to be flaky (brief disconnect/reconnect cycles). The addon
-service compensates at two levels, tunable in `ace-addon.conf`:
+compensates at three levels, tunable in `ace-addon.conf`:
 
-- **Connect retries** (`connect_retries`, `connect_retry_delay_s`): opening the serial
-  port waits out short windows where the device node disappears during a USB bounce.
-- **RPC retries** (`rpc_retries`, `rpc_retry_delay_s`): if a command fails mid-flight,
-  the addon reconnects and resends. Motion commands (feed/retract) are only resent when
-  the request never reached the ACE, so a retry can never double a movement.
+- **Heartbeat** (`keepalive_enabled`, default **false** on Centauri): optional
+  background `get_status` poke. Leave off on CosmOS (~112MB RAM). Use
+  `ace-usb-watch.sh` for USB bring-up logging instead.
+- **Connect retries** (`connect_retries`, `connect_retry_delay_s`): fail-fast open
+  while the rear AMS link flaps; each attempt re-scans for VID `28e9`.
+- **RPC retries** (`rpc_retries`, `rpc_retry_delay_s`): ACEPRO-style — 3 attempts
+  per call with a growing backoff (0.25s, x1.5, capped at 2s) so a retry lands in
+  the next USB up-window when the link is flapping. Motion commands (feed/retract)
+  are sent exactly once, after a retried `get_status` probe proves the link is
+  alive, so a retry can never double a movement.
 
 Use `ACE_CHECK` from the console to verify the link end to end before starting a print.
 On Klipper start, `_ACE_ANNOUNCE_CONNECT` opens the ACE serial port the same way

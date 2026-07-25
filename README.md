@@ -12,9 +12,10 @@ It does not target generic Klipper distributions or every slicer.
 ## What It Does
 
 CosmoACE installs:
-- a Python-based ACE CLI tool
-- a shell wrapper Klipper can call
+- a Python CLI + shell wrapper Klipper can call
+- an optional USB watch script for rear-AMS bring-up (`ace-usb-watch.sh`)
 - a Klipper macro set for blocking start, toolchange, and end-print flows
+- an optional heartbeat init script (**off by default** — too heavy for ~112MB CosmOS)
 
 The supported print flow is:
 1. Load the selected slot to the hub sensor when one is configured.
@@ -44,6 +45,9 @@ remaining work is configuration, physical validation, and cleanup.
 - [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
 - [ ] Test both supported configurations: toolhead-only and hub plus toolhead.
 - [ ] Verify the ACE reconnect and startup announcement after a full printer power cycle.
+- [ ] Stabilize Centauri rear-AMS USB (disconnect / `-71` flaps). ACE may
+      enumerate (`28e9`) then drop every few seconds — that is harness SI, not
+      CosmoACE software. Heartbeat stays off by default on 112MB CosmOS.
 
 ### Cleanup and follow-up
 
@@ -98,7 +102,10 @@ If you prefer to install manually or the script encounters issues with your spec
    ```sh
    cp files/ace-addon.py /user-resource/ace-addon/
    cp files/ace-command.sh /user-resource/ace-addon/
+   cp files/ace-usb-watch.sh /user-resource/ace-addon/
    cp files/ace-addon.conf /user-resource/ace-addon/
+   cp files/ace-addon.init /etc/init.d/ace-addon
+   chmod +x /etc/init.d/ace-addon
    cp files/ace_macros.cfg /etc/klipper/config/ace-addon.cfg
    # Hub-less only: expose ACE_BLIND_CLEAR_HUB on the Mainsail panel
    # cp files/ace_macros_nohub_panel.cfg /etc/klipper/config/
@@ -118,9 +125,11 @@ If you prefer to install manually or the script encounters issues with your spec
    ```sh
    mount -o remount,ro /
    ```
-6. **Restart Klipper:**
+6. **Restart Klipper** (do **not** start `ace-addon` heartbeat by default on CosmOS):
    ```sh
    service klipper restart
+   # Optional USB bring-up log:
+   # /user-resource/ace-addon/ace-usb-watch.sh 5
    ```
 
 ## Hardware
@@ -161,6 +170,49 @@ The 4-pin end of the ACE signal cable uses this pinout
 
 On a normal USB host (Pi, Voron, CosmOS **front** USB), map these straight across and
 leave VCC off. No swap.
+
+#### Rear-AMS bring-up ladder
+
+Software can only talk to the ACE after Linux enumerates it. Climb this ladder on
+the **rear AMS port only**:
+
+1. **Power / seat** — ACE 24V brick on, panel alive, 6-pin seated, 4-pin in the rear
+   chassis port.
+2. **Enumerate** — `lsusb` shows VID `28e9` (GDMicroelectronics ACE).
+3. **TTY** — a **second** `/dev/ttyACM*` appears beside the Klipper MCU.
+4. **RPC** — `ACE_CHECK` / `ace-command.sh health` returns `ok: true`.
+5. **Stay up** — still present after 10+ minutes of idle (no disconnect every few
+   seconds).
+
+While debugging, run the lightweight watcher (manual, not a boot service):
+
+```sh
+/user-resource/ace-addon/ace-usb-watch.sh 5
+# logs to /board-resource/ace-usb.log
+```
+
+**Symptom cheat sheet**
+
+| What you see | Likely cause |
+| --- | --- |
+| No `28e9` in `lsusb`, only Klipper MCU | ACE unpowered, unplugged, or harness open |
+| `28e9` appears then `USB disconnect` every ~3s | Rear AMS signal integrity (strain, polarity, ground) |
+| `error -32` / false low-speed device | Data lines **not** swapped on the board harness |
+| `error -71` during reconnect storms | Same SI / cable path as disconnect flaps |
+| Health OK, then idle dryer/link dies later | Idle drop — occasional `ACE_CHECK`, not a RAM-heavy heartbeat |
+
+While the link still flaps, CosmoACE rides it out ACEPRO-style: every call gets
+3 protocol attempts with a growing backoff (0.25s → 2s) so a retry lands in the
+next USB up-window, and motion commands only go out once, after a retried
+`get_status` probe proves the link is alive.
+
+After step 5 is solid, pin the path in `ace-addon.conf` (health prints a `pin_hint`):
+
+```ini
+serial_port = /dev/ttyACM1
+```
+
+Keep `serial_port = auto` while the link still renumbers after flaps.
 
 #### Board connector pinout (Centauri Carbon, 5-pin)
 

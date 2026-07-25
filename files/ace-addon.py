@@ -3,6 +3,7 @@
 
 import argparse
 import configparser
+import fcntl
 import glob
 import json
 import logging
@@ -21,6 +22,7 @@ except Exception:  # pragma: no cover
     serial = None
 
 DEFAULT_CONFIG_PATH = "/user-resource/ace-addon/ace-addon.conf"
+DEFAULT_LOCK_PATH = "/user-resource/ace-addon/ace.lock"
 
 
 def read_text(path: str, default: str = "") -> str:
@@ -29,6 +31,31 @@ def read_text(path: str, default: str = "") -> str:
             return f.read().strip()
     except Exception:
         return default
+
+
+class ProcessSerialLock:
+    """Cross-process lock so the heartbeat daemon and CLI never share the ACE tty."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self._fh: Any = None
+
+    def __enter__(self) -> "ProcessSerialLock":
+        lock_dir = os.path.dirname(self.path)
+        if lock_dir:
+            os.makedirs(lock_dir, exist_ok=True)
+        self._fh = open(self.path, "a+", encoding="utf-8")
+        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        if self._fh is None:
+            return
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 class AceTransport:
@@ -43,6 +70,18 @@ class AceTransport:
         "drying",
         "drying_stop",
     }
+    # ACEPRO (Merc) matches ports whose pyserial description contains "ACE".
+    ACE_DESCRIPTION_MARKERS = ("ACE", "ANYCUBIC")
+    # GDMicroelectronics ACE Pro USB ID seen on CosmOS / Centauri.
+    ACE_USB_VID = 0x28E9
+    # OpenMoko / Klipper STM32 VID used by the Centauri MCU.
+    KLIPPER_USB_VID = 0x1D50
+    # ACEPRO / AFC-ACE style retry pacing: the ACE USB link can flap on a
+    # ~3s cycle, so a call that reconnects with a short growing delay will
+    # land inside an up-window instead of failing outright. The initial
+    # delay comes from rpc_retry_delay_s and grows by FACTOR up to MAX.
+    RPC_BACKOFF_FACTOR = 1.5
+    RPC_BACKOFF_MAX_S = 2.0
 
     def __init__(self, cfg: configparser.ConfigParser) -> None:
         self.port = cfg.get("ace", "serial_port", fallback="auto").strip() or "auto"
@@ -51,10 +90,11 @@ class AceTransport:
         self.rpc_timeout_s = cfg.getfloat("ace", "rpc_timeout_s", fallback=5.0)
         self.read_idle_s = cfg.getfloat("ace", "read_idle_s", fallback=0.08)
         self.read_max_bytes = cfg.getint("ace", "read_max_bytes", fallback=4096)
-        self.connect_retries = cfg.getint("ace", "connect_retries", fallback=5)
-        self.connect_retry_delay_s = cfg.getfloat("ace", "connect_retry_delay_s", fallback=1.0)
-        self.rpc_retries = cfg.getint("ace", "rpc_retries", fallback=2)
-        self.rpc_retry_delay_s = cfg.getfloat("ace", "rpc_retry_delay_s", fallback=1.0)
+        self.connect_retries = cfg.getint("ace", "connect_retries", fallback=2)
+        self.connect_retry_delay_s = cfg.getfloat("ace", "connect_retry_delay_s", fallback=0.3)
+        # ACEPRO / AFC-ACE use 3 protocol attempts per user-facing call.
+        self.rpc_retries = cfg.getint("ace", "rpc_retries", fallback=3)
+        self.rpc_retry_delay_s = cfg.getfloat("ace", "rpc_retry_delay_s", fallback=0.25)
         self._resolved_port: Optional[str] = None
         self._ser = None
         self._io_lock = threading.Lock()
@@ -137,69 +177,147 @@ class AceTransport:
                 continue
         return ports
 
+    def _port_looks_like_ace(self, path: str, real: str, description: str = "", vid: Optional[int] = None) -> bool:
+        blob = f"{path} {real} {description}".upper()
+        if any(marker in blob for marker in self.ACE_DESCRIPTION_MARKERS):
+            return True
+        if vid is not None and int(vid) == self.ACE_USB_VID:
+            return True
+        return False
+
     def _scan_serial_ports(self) -> Dict[str, Any]:
+        """Scan candidate serial ports, preferring real ACE devices.
+
+        Matching follows mon5termatt/ACEPRO (`find_com_port('ACE')`): prefer
+        ports whose USB description contains ACE / ANYCUBIC, or VID 28e9.
+        Never select the Klipper MCU port.
+        """
         candidates = []
         seen = set()
+        port_meta: Dict[str, Dict[str, Any]] = {}
 
-        # Original CosmoACE order: real tty nodes first (what the ACE actually
-        # presents as), then by-id aliases for reporting.
+        # Prefer pyserial metadata when available (same source ACEPRO uses).
+        if serial is not None:
+            try:
+                import serial.tools.list_ports as list_ports  # type: ignore
+
+                for portinfo in list_ports.comports():
+                    path = str(portinfo.device)
+                    real = os.path.realpath(path)
+                    if path in seen or real in seen:
+                        continue
+                    desc = str(getattr(portinfo, "description", "") or "")
+                    vid = getattr(portinfo, "vid", None)
+                    pid = getattr(portinfo, "pid", None)
+                    hwid = str(getattr(portinfo, "hwid", "") or "")
+                    candidates.append({"path": path, "realpath": real, "source": "list_ports"})
+                    port_meta[path] = {
+                        "description": desc,
+                        "vid": vid,
+                        "pid": pid,
+                        "hwid": hwid,
+                        "is_ace": self._port_looks_like_ace(path, real, desc, vid),
+                    }
+                    seen.add(path)
+                    seen.add(real)
+            except Exception as exc:
+                logging.warning("ACE serial list_ports scan failed: %s", exc)
+
         for pattern in ["/dev/ttyACM*", "/dev/ttyUSB*"]:
             for path in sorted(glob.glob(pattern)):
                 real = os.path.realpath(path)
                 if path in seen or real in seen:
                     continue
                 candidates.append({"path": path, "realpath": real, "source": "glob"})
+                port_meta[path] = {
+                    "description": "",
+                    "vid": None,
+                    "pid": None,
+                    "hwid": "",
+                    "is_ace": self._port_looks_like_ace(path, real),
+                }
                 seen.add(path)
                 seen.add(real)
 
         for path in sorted(glob.glob("/dev/serial/by-id/*")):
             real = os.path.realpath(path)
-            if path in seen or real in seen:
+            # Prefer the by-id path when it clearly names the ACE.
+            is_ace_alias = self._port_looks_like_ace(path, real)
+            if real in seen and not is_ace_alias:
+                continue
+            if path in seen:
                 continue
             candidates.append({"path": path, "realpath": real, "source": "by-id"})
+            port_meta[path] = {
+                "description": path,
+                "vid": None,
+                "pid": None,
+                "hwid": "",
+                "is_ace": is_ace_alias,
+            }
             seen.add(path)
-            seen.add(real)
+            if is_ace_alias:
+                seen.add(real)
 
         klipper_ports = self._klipper_serial_ports()
         report = []
+        ace_candidates = []
         free_candidates = []
         for item in candidates:
             path = item["path"]
             real = item["realpath"]
+            meta = port_meta.get(path, {})
             holders = self._port_holders(path)
             in_use = bool(holders)
             owned_by_klipper = path in klipper_ports or real in klipper_ports
+            vid = meta.get("vid")
+            if vid is not None and int(vid) == self.KLIPPER_USB_VID:
+                owned_by_klipper = True
+            is_ace = bool(meta.get("is_ace")) and not owned_by_klipper
             report_item = {
                 "path": path,
                 "realpath": real,
                 "source": item["source"],
+                "description": meta.get("description", ""),
+                "vid": vid,
+                "pid": meta.get("pid"),
+                "is_ace": is_ace,
                 "in_use": in_use,
                 "holders": holders,
                 "owned_by_klipper": owned_by_klipper,
             }
             report.append(report_item)
-            if not in_use and not owned_by_klipper:
+            if owned_by_klipper or in_use:
+                continue
+            if is_ace:
+                ace_candidates.append(path)
+            else:
                 free_candidates.append(path)
 
         return {
             "candidates": report,
+            "ace_candidates": ace_candidates,
             "free_candidates": free_candidates,
         }
 
     def _resolve_target_port(self) -> Optional[str]:
-        # Same as original CosmoACE: explicit path, or auto = first free
-        # non-Klipper tty/by-id candidate. No globs, no waiting.
+        # Explicit path wins. For auto, only open a real ACE device (VID/description).
+        # Never fall back to a random free tty — that can grab the wrong ACM node
+        # while the rear AMS link is flapping.
         if self.port.lower() != "auto":
             self._resolved_port = self.port
             return self._resolved_port
         scan = self._scan_serial_ports()
-        free = scan.get("free_candidates", [])
-        if not free:
-            self._resolved_port = None
-            self.last_error = "no free USB serial ports found (all candidates are busy or used by klipper)"
-            return None
-        self._resolved_port = str(free[0])
-        return self._resolved_port
+        ace = scan.get("ace_candidates", [])
+        if ace:
+            self._resolved_port = str(ace[0])
+            return self._resolved_port
+        self._resolved_port = None
+        self.last_error = (
+            "no ACE USB device found (want description containing ACE / VID 28e9; "
+            "Klipper MCU ports are ignored). Check the rear AMS cable / ACE power."
+        )
+        return None
 
     def connect(self, retries: Optional[int] = None, retry_delay_s: Optional[float] = None) -> bool:
         if serial is None:
@@ -212,7 +330,9 @@ class AceTransport:
         retry_delay_s = self.connect_retry_delay_s if retry_delay_s is None else retry_delay_s
 
         # BunnyACE / original CosmoACE: open the resolved path, sleep, retry.
+        # Always re-scan between attempts so a flapping rear-AMS node is rediscovered.
         for attempt in range(retries + 1):
+            self._resolved_port = None
             target_port = self._resolve_target_port()
             if target_port:
                 try:
@@ -227,10 +347,11 @@ class AceTransport:
                     return True
                 except (serial.SerialException, OSError) as exc:
                     err_str = str(exc)
-                    if "No such device" in err_str or "[Errno 19]" in err_str:
-                        time.sleep(0.5)
                     self.last_error = f"connect failed: {exc}"
                     self._ser = None
+                    self._resolved_port = None
+                    if "No such device" in err_str or "[Errno 19]" in err_str:
+                        time.sleep(0.25)
 
             if attempt < retries:
                 time.sleep(retry_delay_s)
@@ -244,6 +365,9 @@ class AceTransport:
         except Exception:
             pass
         self._ser = None
+        # Force the next connect() to re-scan; rear AMS paths renumber after -71 flaps.
+        if self.port.lower() == "auto":
+            self._resolved_port = None
 
     @staticmethod
     def _crc16_mcrf4xx(data: bytes) -> int:
@@ -396,6 +520,23 @@ class AceTransport:
         idempotent = method in self.IDEMPOTENT_METHODS
         last_failure: Dict[str, Any] = {"ok": False, "error": "rpc not attempted"}
 
+        # ACEPRO defers commands until the first heartbeat succeeds after a
+        # reconnect. Motion RPCs are never resent, so prove the link is alive
+        # with a retried status probe first — the motion command then goes out
+        # exactly once on a link that just answered.
+        if not idempotent and self.rpc_retries > 0:
+            probe = self.rpc_call("get_status")
+            if not probe.get("ok", False):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"link check before {method} failed: "
+                        f"{probe.get('error') or 'no response'}"
+                    ),
+                    "link_probe": probe,
+                }
+
+        backoff_s = max(0.05, self.rpc_retry_delay_s)
         for attempt in range(self.rpc_retries + 1):
             result = self._rpc_call_once(method, params)
             if result.get("ok", False):
@@ -415,14 +556,16 @@ class AceTransport:
 
             if attempt < self.rpc_retries:
                 logging.warning(
-                    "rpc %s attempt %d/%d failed (%s); reconnecting and retrying",
+                    "rpc %s attempt %d/%d failed (%s); reconnecting and retrying in %.2fs",
                     method,
                     attempt + 1,
                     self.rpc_retries + 1,
                     result.get("error"),
+                    backoff_s,
                 )
                 self.disconnect()
-                time.sleep(self.rpc_retry_delay_s)
+                time.sleep(backoff_s)
+                backoff_s = min(self.RPC_BACKOFF_MAX_S, backoff_s * self.RPC_BACKOFF_FACTOR)
 
         if self.rpc_retries > 0:
             last_failure["retries_exhausted"] = self.rpc_retries
@@ -581,7 +724,7 @@ class MoonrakerClient:
 
 
 class AceController:
-    def __init__(self, cfg: configparser.ConfigParser) -> None:
+    def __init__(self, cfg: configparser.ConfigParser, start_heartbeat: bool = False) -> None:
         self.cfg = cfg
         self.transport = AceTransport(cfg)
         self.moonraker = MoonrakerClient(cfg)
@@ -592,13 +735,92 @@ class AceController:
         self.feed_speed = cfg.getint("ace", "feed_speed", fallback=25)
         self.retract_speed = cfg.getint("ace", "retract_speed", fallback=15)
         self.dry_fan_speed = cfg.getint("ace", "dry_fan_speed", fallback=7000)
+        # ACEPRO-style: poke get_status periodically so the ACE does not idle-drop.
+        self.keepalive_enabled = cfg.getboolean("ace", "keepalive_enabled", fallback=False)
+        self.keepalive_interval_s = cfg.getfloat("ace", "keepalive_interval_s", fallback=1.0)
+        self.lock_path = (
+            cfg.get("ace", "lock_path", fallback=DEFAULT_LOCK_PATH).strip() or DEFAULT_LOCK_PATH
+        )
         self.sensor_name = cfg.get("klipper", "sensor_name", fallback="runout").strip() or "runout"
         self.last_ace_status: Optional[Dict[str, Any]] = None
         self.last_ace_status_unix: float = 0.0
         self.last_command: Optional[Dict[str, Any]] = None
+        self.last_heartbeat_ok_unix: float = 0.0
+        self.last_heartbeat_error: Optional[str] = None
+        self._ops_lock = threading.RLock()
+        self._stop = threading.Event()
+        self._heartbeat_thread: Optional[threading.Thread] = None
+        if start_heartbeat and self.keepalive_enabled:
+            self._heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                name="ace-addon-heartbeat",
+                daemon=True,
+            )
+            self._heartbeat_thread.start()
 
     def close(self) -> None:
-        pass
+        self._stop.set()
+        if self._heartbeat_thread is not None:
+            self._heartbeat_thread.join(timeout=2.0)
+            self._heartbeat_thread = None
+
+    def _serial_lock(self) -> ProcessSerialLock:
+        return ProcessSerialLock(self.lock_path)
+
+    def _heartbeat_loop(self) -> None:
+        """Background get_status pings (ACEPRO ~1s). Releases the tty between ticks."""
+        reconnect_backoff_s = max(0.2, self.keepalive_interval_s)
+        last_warn_unix = 0.0
+        logging.info(
+            "ACE heartbeat started (interval=%.1fs, lock=%s)",
+            self.keepalive_interval_s,
+            self.lock_path,
+        )
+        while not self._stop.is_set():
+            wait_s = max(0.2, self.keepalive_interval_s)
+            if self.keepalive_enabled:
+                with self._serial_lock():
+                    with self._ops_lock:
+                        # Fail fast: do not burn connect/rpc retries while holding the
+                        # cross-process lock (CLI macros need the same lock).
+                        old_connect = self.transport.connect_retries
+                        old_rpc = self.transport.rpc_retries
+                        self.transport.connect_retries = 0
+                        self.transport.rpc_retries = 0
+                        try:
+                            res = self.transport.rpc_call("get_status")
+                            if res.get("ok", False):
+                                parsed = res.get("response")
+                                if isinstance(parsed, dict) and isinstance(parsed.get("result"), dict):
+                                    self.last_ace_status = parsed.get("result")
+                                    self.last_ace_status_unix = time.time()
+                                self.last_heartbeat_ok_unix = time.time()
+                                self.last_heartbeat_error = None
+                                reconnect_backoff_s = max(0.2, self.keepalive_interval_s)
+                            else:
+                                err = str(res.get("error") or "heartbeat get_status failed")
+                                self.last_heartbeat_error = err
+                                wait_s = reconnect_backoff_s
+                                reconnect_backoff_s = min(30.0, reconnect_backoff_s * 1.5)
+                                now = time.time()
+                                if now - last_warn_unix >= 30.0:
+                                    logging.warning("ACE heartbeat failed: %s", err)
+                                    last_warn_unix = now
+                        except Exception as exc:
+                            self.last_heartbeat_error = f"heartbeat failed: {exc}"
+                            self.transport.last_error = self.last_heartbeat_error
+                            wait_s = reconnect_backoff_s
+                            reconnect_backoff_s = min(30.0, reconnect_backoff_s * 1.5)
+                            now = time.time()
+                            if now - last_warn_unix >= 30.0:
+                                logging.warning("ACE heartbeat exception: %s", exc)
+                                last_warn_unix = now
+                        finally:
+                            self.transport.connect_retries = old_connect
+                            self.transport.rpc_retries = old_rpc
+                            # Free the port so one-shot CLI commands can open it.
+                            self.transport.disconnect()
+            self._stop.wait(wait_s)
 
     @staticmethod
     def _user_slot_to_index(slot: int) -> Optional[int]:
@@ -740,6 +962,13 @@ class AceController:
             "serial_port": transport.get("serial_port"),
             "connected": True,
             "ace": summary,
+            # After the rear AMS link stays up ~10+ minutes, pin this in ace-addon.conf:
+            #   serial_port = /dev/ttyACM1
+            "pin_hint": (
+                f"serial_port = {transport.get('serial_port')}"
+                if transport.get("serial_port")
+                else None
+            ),
         }
 
     def _get_device_info(self) -> Dict[str, Any]:
@@ -1111,6 +1340,11 @@ class AceController:
         }
 
     def execute(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._serial_lock():
+            with self._ops_lock:
+                return self._execute_unlocked(payload)
+
+    def _execute_unlocked(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         params = payload.get("params") or {}
         if not isinstance(params, dict):
             params = {}
@@ -1403,8 +1637,15 @@ class AceController:
                 "drying",
                 {"temp": temp_c, "fan_speed": fan_speed, "duration": minutes},
             )
+            if result.get("ok", False):
+                msg = f"ACE dryer started: {temp_c}C for {minutes} min (fan {fan_speed})"
+                print(msg, flush=True)
+                result["message"] = msg
         elif cmd == "dry_stop":
             result = self.transport.rpc_call("drying_stop")
+            if result.get("ok", False):
+                print("ACE dryer stopped", flush=True)
+                result["message"] = "ACE dryer stopped"
         elif cmd == "health":
             result = self._check_health()
         elif cmd == "announce_connect":
@@ -1463,6 +1704,10 @@ class AceController:
             },
             "ace_status": self.last_ace_status,
             "ace_status_unix": self.last_ace_status_unix,
+            "keepalive_enabled": self.keepalive_enabled,
+            "keepalive_interval_s": self.keepalive_interval_s,
+            "last_heartbeat_ok_unix": self.last_heartbeat_ok_unix,
+            "last_heartbeat_error": self.last_heartbeat_error,
             "last_command": self.last_command,
         }
 
@@ -1478,9 +1723,16 @@ def parse_config(path: str) -> configparser.ConfigParser:
                 "rpc_timeout_s": "2.5",
                 "read_idle_s": "0.08",
                 "read_max_bytes": "4096",
+                "connect_retries": "2",
+                "connect_retry_delay_s": "0.3",
+                "rpc_retries": "3",
+                "rpc_retry_delay_s": "0.5",
                 "feed_speed": "25",
                 "retract_speed": "15",
                 "dry_fan_speed": "7000",
+                "keepalive_enabled": "false",
+                "keepalive_interval_s": "1.0",
+                "lock_path": DEFAULT_LOCK_PATH,
                 "log_path": "/board-resource/ace-addon.log",
             },
             "klipper": {
@@ -1502,14 +1754,16 @@ def parse_config(path: str) -> configparser.ConfigParser:
     return cfg
 
 
-def configure_logging(cfg: configparser.ConfigParser) -> None:
+def configure_logging(cfg: configparser.ConfigParser, daemon: bool = False) -> None:
     log_path = cfg.get("ace", "log_path", fallback="/board-resource/ace-addon.log")
     log_dir = os.path.dirname(log_path)
     if log_dir:
         os.makedirs(log_dir, exist_ok=True)
-    handlers = [
+    handlers: list = [
         logging.FileHandler(log_path, encoding="utf-8"),
     ]
+    if daemon:
+        handlers.append(logging.StreamHandler())
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(message)s",
@@ -1536,13 +1790,13 @@ def emit_json(payload: Dict[str, Any], always: bool = False) -> None:
 def run_command(config_path: str, payload: Dict[str, Any]) -> int:
     cfg = parse_config(config_path)
     configure_logging(cfg)
-    controller = AceController(cfg)
+    controller = AceController(cfg, start_heartbeat=False)
     try:
         result = controller.execute(payload)
-        # Health output is informational, so always show it.
         emit_json(
             result,
-            always=str(payload.get("cmd", "")).strip().lower() in {"health", "announce_connect"},
+            always=str(payload.get("cmd", "")).strip().lower()
+            in {"health", "announce_connect", "dry_start", "dry_stop"},
         )
         return 0 if result.get("ok", False) else 1
     finally:
@@ -1553,7 +1807,7 @@ def run_command(config_path: str, payload: Dict[str, Any]) -> int:
 def run_status(config_path: str, refresh: bool) -> int:
     cfg = parse_config(config_path)
     configure_logging(cfg)
-    controller = AceController(cfg)
+    controller = AceController(cfg, start_heartbeat=False)
     try:
         if refresh:
             controller.execute({"cmd": "status_refresh"})
@@ -1564,10 +1818,34 @@ def run_status(config_path: str, refresh: bool) -> int:
         controller.transport.disconnect()
 
 
+def run_heartbeat(config_path: str) -> int:
+    """Background-only daemon: periodic get_status, no HTTP."""
+    cfg = parse_config(config_path)
+    configure_logging(cfg, daemon=True)
+    if not cfg.getboolean("ace", "keepalive_enabled", fallback=True):
+        logging.error("keepalive_enabled=false; heartbeat daemon has nothing to do")
+        return 1
+    controller = AceController(cfg, start_heartbeat=True)
+    logging.info(
+        "ACE heartbeat daemon running (interval=%.1fs)",
+        controller.keepalive_interval_s,
+    )
+    try:
+        while True:
+            time.sleep(3600.0)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        controller.close()
+        controller.transport.disconnect()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default=None, help="Path to ace-addon.conf")
     subparsers = parser.add_subparsers(dest="action")
+    subparsers.required = False
 
     command_parser = subparsers.add_parser("command", help="Send one ACE command")
     command_parser.add_argument("--cmd", required=True, help="feed|feed_wait|retract|retract_wait|feed_to_sensor|retract_to_sensor|wait_motion|clear_hub|stop|stop_unwind|dry_start|dry_stop|health|announce_connect|status_refresh|slot_status|assert_slot_ready|raw_method|set_serial")
@@ -1585,6 +1863,10 @@ def main() -> int:
 
     status_parser = subparsers.add_parser("status", help="Emit ACE transport/controller status")
     status_parser.add_argument("--refresh", action="store_true", help="Refresh ACE status over RPC before printing status")
+
+    subparsers.add_parser("heartbeat", help="Run background get_status keepalive daemon")
+    # Alias kept for older init scripts.
+    subparsers.add_parser("serve", help=argparse.SUPPRESS)
 
     args = parser.parse_args()
 
@@ -1620,6 +1902,8 @@ def main() -> int:
         return run_command(config_path, payload)
     if args.action == "status":
         return run_status(config_path, refresh=bool(args.refresh))
+    if args.action in (None, "heartbeat", "serve"):
+        return run_heartbeat(config_path)
 
     parser.print_help()
     return 1
