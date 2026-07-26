@@ -111,7 +111,8 @@ Pin-by-pin tables, DIY adapters, and front-USB checks are in the
 | ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
 | ACE LEDs are off                           | Plug in the ACE’s 24V brick and power it on                                                              |
 | Printer never “sees” the ACE               | Reseat both ends of the signal cable; confirm the board data wires were swapped                          |
-| ACE shows up, then drops every few seconds | Cable strain, bad ground, or a flaky harness — software can retry, but the cable path still needs fixing |
+| ACE drops on an exact ~3.6s rhythm | Run `service ace-addon status`; the protocol keepalive must be running |
+| ACE drops irregularly while keepalive runs | Check cable strain, ground, and the rear harness / VBUS |
 | Macros say the sensor is already triggered | Check hub / toolhead sensor wiring, or disable a hub sensor you don’t have                               |
 
 

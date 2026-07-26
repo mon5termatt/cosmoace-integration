@@ -59,18 +59,18 @@ if [ ! -f "${ADDON_DIR}/ace-addon.conf" ]; then
 fi
 chmod 0644 "${ADDON_DIR}/ace-addon.conf"
 
-# Install init script for optional manual heartbeat, but do NOT enable at boot.
-# CosmOS (~112MB RAM) cannot afford an always-on Python poller.
-echo "Installing ace-addon init script (boot autostart disabled)..."
+# Install the low-priority protocol watchdog. Real get_status traffic prevents
+# the ACE GD32 from dropping USB on its exact 3.584s idle watchdog.
+echo "Installing ACE protocol keepalive service..."
 cp "${SCRIPT_DIR}/files/ace-addon.init" /etc/init.d/ace-addon
 chmod 0755 /etc/init.d/ace-addon
 rm -f /etc/rc2.d/S80ace-addon /etc/rc3.d/S80ace-addon /etc/rc4.d/S80ace-addon /etc/rc5.d/S80ace-addon
+for level in 2 3 4 5; do
+    ln -sfn ../init.d/ace-addon "/etc/rc${level}.d/S98ace-addon" 2>/dev/null || true
+done
 for level in 0 1 6; do
     ln -sfn ../init.d/ace-addon "/etc/rc${level}.d/K20ace-addon" 2>/dev/null || true
 done
-if command -v update-rc.d >/dev/null 2>&1; then
-    update-rc.d -f ace-addon remove >/dev/null 2>&1 || true
-fi
 
 # Disable USB autosuspend for ACE Pro (VID 28e9 / PID 018a).
 # Match the USB device only — not interfaces (:1.0/:1.1), which reject
@@ -85,16 +85,22 @@ fi
 if command -v service >/dev/null 2>&1; then
     echo "Restarting Klipper..."
     service klipper restart || true
+    echo "Waiting 45s for Klipper load to settle before starting ACE keepalive..."
+    sleep 45
+    service ace-addon start || true
 elif command -v systemctl >/dev/null 2>&1; then
     echo "Restarting Klipper..."
     systemctl restart klipper || true
+    echo "Waiting 45s for Klipper load to settle before starting ACE keepalive..."
+    sleep 45
+    systemctl start ace-addon || true
 fi
 
 echo "Remounting root as RO..."
 mount -o remount,ro / || echo "Warning: Could not remount root as RO."
 
-echo "ACE add-on installed (CLI; heartbeat OFF by default)."
+echo "ACE add-on installed (CLI + low-priority protocol keepalive)."
 echo "Configuration:      $ADDON_DIR/ace-addon.conf"
 echo "Editable macros:    $KLIPPER_USER_MACROS_CFG"
 echo "USB watch (manual): $ADDON_DIR/ace-usb-watch.sh"
-echo "Optional heartbeat: service ace-addon start  # only if keepalive_enabled=true"
+echo "Keepalive service:  service ace-addon status"

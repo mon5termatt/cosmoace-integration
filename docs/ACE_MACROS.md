@@ -17,9 +17,12 @@ compensates at three levels, tunable in `ace-addon.conf`. Full measured numbers,
 harness usage, and by-id pinning rationale:
 [ACE USB Stability](ACE_USB_STABILITY.md).
 
-- **Heartbeat** (`keepalive_enabled`, default **false** on Centauri): optional
-  background `get_status` poke. Leave off on CosmOS (~112MB RAM). Use
-  `ace-usb-watch.sh` for USB bring-up logging instead.
+- **Protocol keepalive** (`keepalive_enabled`, default **true**): a low-priority
+  `get_status` every 2s. Testing showed the ACE GD32 drops USB on an exact
+  3.584s timer when there is no Anycubic protocol traffic; merely holding the
+  tty open does not help. The daemon releases the tty between ticks and skips
+  ticks when 1-minute host load reaches `keepalive_load_limit` (default 2.0),
+  protecting Klipper from “Timer too close”.
 - **Stable device path**: default `serial_port` is the
   `/dev/serial/by-id/usb-ANYCUBIC_ACE_*` alias (not raw `/dev/ttyACM*`) — the
   alias keeps its name when the ACM node renumbers after a flap. `auto` still

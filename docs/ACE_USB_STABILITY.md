@@ -47,7 +47,8 @@ Related knobs (same conf file):
 | `connect_settle_s` | `0.15` | Pause after a successful open before the first write (fresh ACM bind). |
 | `connect_retries` / `connect_retry_delay_s` | `2` / `0.3` | Fail-fast open while the link flaps; each attempt re-scans. |
 | `rpc_retries` / `rpc_retry_delay_s` | `3` / `0.25` | ACEPRO-style: 3 attempts with growing backoff (×1.5, cap 2s). Motion RPCs are sent once after a retried `get_status` probe. |
-| `keepalive_enabled` | `false` | Leave off on CosmOS (~112MB RAM). Use the watcher / stability harness instead of an always-on Python poller. |
+| `keepalive_enabled` / `keepalive_interval_s` | `true` / `2.0` | Low-priority `get_status` traffic suppresses the ACE's 3.584s USB watchdog. |
+| `keepalive_load_limit` | `2.0` | Skip ticks when 1-minute host load is high; Klipper timing wins over ACE continuity. |
 
 ## Tools
 
@@ -138,12 +139,34 @@ restarting Klipper, and waiting ~45s:
 ~**3.6×** lower average latency with the pin. The hardware flap rate itself
 was unchanged.
 
+## 3.584-second watchdog finding
+
+The loop is not Linux autosuspend or random bus noise:
+
+- `usbcore.autosuspend=-1`, `power/control=on`, `runtime_status=active`
+- no process holding the ACE tty
+- disconnect deltas exactly **3.584s** (15/15 and longer samples)
+- merely holding the tty file descriptor open did not change the period
+- real Anycubic `get_status` traffic reduced a 30s sample from 8 disconnects
+  idle to 1 disconnect, with the gap stretching to 21s
+- stopping protocol traffic immediately restored the exact 3.584s loop
+
+That points to an ACE GD32 firmware watchdog. CosmoACE therefore runs a
+low-priority, no-HTTP protocol keepalive every 2s. It releases the tty between
+ticks for CLI macros and skips ticks at high host load.
+
+Initial on-printer soak with the guarded daemon:
+
+- **0 disconnects in 120s** (versus ~33 expected at the 3.584s idle rate)
+- 1-minute load stayed **0.10–0.52**
+- daemon RSS stayed flat at **16.7MB**
+- a concurrent CLI health check passed in **160ms**
+
 ## What software will not fix
 
-- The ~3s disconnect / reconnect cycle on the rear AMS harness.
+- A true cable / ground / VBUS fault.
 - Rising USB device numbers in `dmesg`.
-- Idle dryer / link death after long quiet periods without an occasional
-  `ACE_CHECK` (heartbeat stays off by default on this board).
+- ACE resets during a skipped keepalive tick if the host is overloaded.
 
 Climb the rear-AMS bring-up ladder in the [README](../README.md) for the
 hardware side. Use this doc for the software identity, knobs, and how to

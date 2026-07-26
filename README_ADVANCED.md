@@ -21,7 +21,7 @@ CosmoACE installs:
 - a Python CLI + shell wrapper Klipper can call
 - an optional USB watch script for rear-AMS bring-up (`ace-usb-watch.sh`)
 - a Klipper macro set for blocking start, toolchange, and end-print flows
-- an optional heartbeat init script (**off by default** — too heavy for ~112MB CosmOS)
+- a low-priority protocol keepalive (2s `get_status`, host-load guarded)
 
 The supported print flow is:
 1. Load the selected slot to the hub sensor when one is configured.
@@ -51,9 +51,9 @@ remaining work is configuration, physical validation, and cleanup.
 - [ ] Bench-test start, toolchange, and end-print on the Canvas toolhead.
 - [ ] Test both supported configurations: toolhead-only and hub plus toolhead.
 - [ ] Verify the ACE reconnect and startup announcement after a full printer power cycle.
-- [ ] Stabilize Centauri rear-AMS USB (disconnect / `-71` flaps). ACE may
-      enumerate (`28e9`) then drop every few seconds — that is harness SI, not
-      CosmoACE software. Heartbeat stays off by default on 112MB CosmOS.
+- [ ] Continue validating Centauri rear-AMS USB. The exact 3.584s idle loop was
+      traced to the ACE GD32 protocol watchdog; the 2s keepalive suppresses it.
+      Separate `-71` / `-32` errors can still indicate cable or VBUS trouble.
 
 ### Cleanup and follow-up
 
@@ -134,9 +134,10 @@ If you prefer to install manually or the script encounters issues with your spec
    ```sh
    mount -o remount,ro /
    ```
-6. **Restart Klipper** (do **not** start `ace-addon` heartbeat by default on CosmOS):
+6. **Restart Klipper**, then start the low-priority ACE protocol keepalive:
    ```sh
    service klipper restart
+   service ace-addon start
    # Optional USB bring-up log:
    # /user-resource/ace-addon/ace-usb-watch.sh 5
    ```
@@ -185,7 +186,7 @@ leave VCC off. No swap.
 Software can only talk to the ACE after Linux enumerates it. Climb this ladder on
 the **rear AMS port only**:
 
-1. **Power / seat** — ACE 24V brick on, panel alive, 6-pin seated, 4-pin in the rear
+1. **Power / seat** — ACE 24V brick on, LEDs lit, 6-pin seated, 4-pin in the rear
    chassis port.
 2. **Enumerate** — `lsusb` shows VID `28e9` (GDMicroelectronics ACE).
 3. **TTY** — a **second** `/dev/ttyACM*` appears beside the Klipper MCU.
@@ -229,10 +230,11 @@ renumbered mid-test and by-id is doing its job; `settle` picks the smallest
 | What you see | Likely cause |
 | --- | --- |
 | No `28e9` in `lsusb`, only Klipper MCU | ACE unpowered, unplugged, or harness open |
-| `28e9` appears then `USB disconnect` every ~3s | Rear AMS signal integrity (strain, polarity, ground) |
+| Exact 3.584s USB loop only while idle | ACE GD32 protocol watchdog — verify `ace-addon` keepalive is running |
+| Irregular disconnects under protocol traffic | Rear AMS signal integrity / VBUS (strain, polarity, ground) |
 | `error -32` / false low-speed device | Data lines **not** swapped on the board harness |
 | `error -71` during reconnect storms | Same SI / cable path as disconnect flaps |
-| Health OK, then idle dryer/link dies later | Idle drop — occasional `ACE_CHECK`, not a RAM-heavy heartbeat |
+| Health OK, then idle dryer/link dies later | Check `service ace-addon status` and `keepalive_enabled=true` |
 
 While the link still flaps, CosmoACE rides it out ACEPRO-style: every call gets
 3 protocol attempts with a growing backoff (0.25s → 2s) so a retry lands in the

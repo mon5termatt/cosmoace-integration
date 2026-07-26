@@ -773,8 +773,12 @@ class AceController:
         self.retract_speed = cfg.getint("ace", "retract_speed", fallback=15)
         self.dry_fan_speed = cfg.getint("ace", "dry_fan_speed", fallback=7000)
         # ACEPRO-style: poke get_status periodically so the ACE does not idle-drop.
-        self.keepalive_enabled = cfg.getboolean("ace", "keepalive_enabled", fallback=False)
-        self.keepalive_interval_s = cfg.getfloat("ace", "keepalive_interval_s", fallback=1.0)
+        self.keepalive_enabled = cfg.getboolean("ace", "keepalive_enabled", fallback=True)
+        self.keepalive_interval_s = cfg.getfloat("ace", "keepalive_interval_s", fallback=2.0)
+        # Never let keepalive compete with Klipper on this 112MB / 2-core host.
+        # A skipped tick may let the ACE reset, but that is safer than starving
+        # Klipper and triggering "Timer too close".
+        self.keepalive_load_limit = cfg.getfloat("ace", "keepalive_load_limit", fallback=2.0)
         self.lock_path = (
             cfg.get("ace", "lock_path", fallback=DEFAULT_LOCK_PATH).strip() or DEFAULT_LOCK_PATH
         )
@@ -805,17 +809,35 @@ class AceController:
         return ProcessSerialLock(self.lock_path)
 
     def _heartbeat_loop(self) -> None:
-        """Background get_status pings (ACEPRO ~1s). Releases the tty between ticks."""
+        """Low-rate get_status watchdog. Releases the tty between ticks."""
         reconnect_backoff_s = max(0.2, self.keepalive_interval_s)
         last_warn_unix = 0.0
+        last_load_warn_unix = 0.0
         logging.info(
-            "ACE heartbeat started (interval=%.1fs, lock=%s)",
+            "ACE heartbeat started (interval=%.1fs, load_limit=%.2f, lock=%s)",
             self.keepalive_interval_s,
+            self.keepalive_load_limit,
             self.lock_path,
         )
         while not self._stop.is_set():
             wait_s = max(0.2, self.keepalive_interval_s)
             if self.keepalive_enabled:
+                try:
+                    load_1m = os.getloadavg()[0]
+                except (AttributeError, OSError):
+                    load_1m = 0.0
+                if self.keepalive_load_limit > 0 and load_1m >= self.keepalive_load_limit:
+                    now = time.time()
+                    if now - last_load_warn_unix >= 60.0:
+                        logging.warning(
+                            "ACE heartbeat skipped: host load %.2f >= %.2f",
+                            load_1m,
+                            self.keepalive_load_limit,
+                        )
+                        last_load_warn_unix = now
+                    # Back off one interval. Do not touch the serial lock.
+                    self._stop.wait(wait_s)
+                    continue
                 with self._serial_lock():
                     with self._ops_lock:
                         # Fail fast: do not burn connect/rpc retries while holding the
@@ -1745,6 +1767,7 @@ class AceController:
             "ace_status_unix": self.last_ace_status_unix,
             "keepalive_enabled": self.keepalive_enabled,
             "keepalive_interval_s": self.keepalive_interval_s,
+            "keepalive_load_limit": self.keepalive_load_limit,
             "last_heartbeat_ok_unix": self.last_heartbeat_ok_unix,
             "last_heartbeat_error": self.last_heartbeat_error,
             "last_command": self.last_command,
@@ -1770,8 +1793,9 @@ def parse_config(path: str) -> configparser.ConfigParser:
                 "feed_speed": "25",
                 "retract_speed": "15",
                 "dry_fan_speed": "7000",
-                "keepalive_enabled": "false",
-                "keepalive_interval_s": "1.0",
+                "keepalive_enabled": "true",
+                "keepalive_interval_s": "2.0",
+                "keepalive_load_limit": "2.0",
                 "lock_path": DEFAULT_LOCK_PATH,
                 "log_path": "/board-resource/ace-addon.log",
             },
@@ -1875,6 +1899,11 @@ def run_heartbeat(config_path: str) -> int:
     """Background-only daemon: periodic get_status, no HTTP."""
     cfg = parse_config(config_path)
     configure_logging(cfg, daemon=True)
+    try:
+        # Keep Klipper's real-time host work ahead of this best-effort watchdog.
+        os.nice(10)
+    except (AttributeError, OSError):
+        pass
     if not cfg.getboolean("ace", "keepalive_enabled", fallback=True):
         logging.error("keepalive_enabled=false; heartbeat daemon has nothing to do")
         return 1
