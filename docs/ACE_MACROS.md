@@ -13,11 +13,21 @@ This document lists the macros in `files/ace_macros.cfg`, what each one does, an
 ## Connection Reliability
 
 The ACE's USB link is known to be flaky (brief disconnect/reconnect cycles). The addon
-compensates at three levels, tunable in `ace-addon.conf`:
+compensates at three levels, tunable in `ace-addon.conf`. Full measured numbers,
+harness usage, and by-id pinning rationale:
+[ACE USB Stability](ACE_USB_STABILITY.md).
 
 - **Heartbeat** (`keepalive_enabled`, default **false** on Centauri): optional
   background `get_status` poke. Leave off on CosmOS (~112MB RAM). Use
   `ace-usb-watch.sh` for USB bring-up logging instead.
+- **Stable device path**: default `serial_port` is the
+  `/dev/serial/by-id/usb-ANYCUBIC_ACE_*` alias (not raw `/dev/ttyACM*`) — the
+  alias keeps its name when the ACM node renumbers after a flap. `auto` still
+  prefers by-id when present but re-scans every call. `connect_settle_s`
+  (default 0.15s) pauses after a fresh open so a just-rebound port is actually
+  ready before the first write. Use `ace-stability-test.sh`
+  (`flap` / `rpc` / `paths` / `settle` / `all`) to measure flap rate and tune
+  these knobs instead of guessing.
 - **Connect retries** (`connect_retries`, `connect_retry_delay_s`): fail-fast open
   while the rear AMS link flaps; each attempt re-scans for VID `28e9`.
 - **RPC retries** (`rpc_retries`, `rpc_retry_delay_s`): ACEPRO-style — 3 attempts

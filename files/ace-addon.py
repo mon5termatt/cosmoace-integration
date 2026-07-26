@@ -92,6 +92,8 @@ class AceTransport:
         self.read_max_bytes = cfg.getint("ace", "read_max_bytes", fallback=4096)
         self.connect_retries = cfg.getint("ace", "connect_retries", fallback=2)
         self.connect_retry_delay_s = cfg.getfloat("ace", "connect_retry_delay_s", fallback=0.3)
+        # Pause after a successful open before the first write (fresh ACM bind).
+        self.connect_settle_s = cfg.getfloat("ace", "connect_settle_s", fallback=0.15)
         # ACEPRO / AFC-ACE use 3 protocol attempts per user-facing call.
         self.rpc_retries = cfg.getint("ace", "rpc_retries", fallback=3)
         self.rpc_retry_delay_s = cfg.getfloat("ace", "rpc_retry_delay_s", fallback=0.25)
@@ -294,29 +296,59 @@ class AceTransport:
             else:
                 free_candidates.append(path)
 
+        # Prefer the stable /dev/serial/by-id alias over raw /dev/ttyACM*:
+        # the alias name survives rear-AMS flaps even when the ACM node
+        # renumbers (ttyACM1 -> ttyACM2 ...).
+        ace_candidates.sort(key=lambda p: 0 if p.startswith("/dev/serial/by-id/") else 1)
+
         return {
             "candidates": report,
             "ace_candidates": ace_candidates,
             "free_candidates": free_candidates,
         }
 
+    def stable_alias_for(self, port: Optional[str]) -> Optional[str]:
+        """Return the ACE-looking /dev/serial/by-id alias for a port, if any."""
+        if not port:
+            return None
+        if port.startswith("/dev/serial/by-id/"):
+            return port
+        real = os.path.realpath(port)
+        for alias in sorted(glob.glob("/dev/serial/by-id/*")):
+            if os.path.realpath(alias) == real and self._port_looks_like_ace(alias, real):
+                return alias
+        return None
+
     def _resolve_target_port(self) -> Optional[str]:
-        # Explicit path wins. For auto, only open a real ACE device (VID/description).
-        # Never fall back to a random free tty — that can grab the wrong ACM node
-        # while the rear AMS link is flapping.
-        if self.port.lower() != "auto":
+        # Explicit path wins when it exists. For auto (or a missing pin), only
+        # open a real ACE device (VID/description). Never fall back to a random
+        # free tty — that can grab the wrong ACM node while the rear AMS link
+        # is flapping.
+        if self.port.lower() != "auto" and os.path.exists(self.port):
             self._resolved_port = self.port
             return self._resolved_port
+        if self.port.lower() != "auto":
+            logging.warning(
+                "configured serial_port %s is missing; scanning for ACE "
+                "(USB flap or udev lag)",
+                self.port,
+            )
         scan = self._scan_serial_ports()
         ace = scan.get("ace_candidates", [])
         if ace:
             self._resolved_port = str(ace[0])
             return self._resolved_port
         self._resolved_port = None
-        self.last_error = (
-            "no ACE USB device found (want description containing ACE / VID 28e9; "
-            "Klipper MCU ports are ignored). Check the rear AMS cable / ACE power."
-        )
+        if self.port.lower() != "auto":
+            self.last_error = (
+                f"ACE serial path missing: {self.port} (and no ACE USB device "
+                "found to fall back to). Check ACE power and the rear AMS cable."
+            )
+        else:
+            self.last_error = (
+                "no ACE USB device found (want description containing ACE / VID 28e9; "
+                "Klipper MCU ports are ignored). Check the rear AMS cable / ACE power."
+            )
         return None
 
     def connect(self, retries: Optional[int] = None, retry_delay_s: Optional[float] = None) -> bool:
@@ -344,6 +376,11 @@ class AceTransport:
                     )
                     self.last_error = None
                     self.last_seen_unix = time.time()
+                    # Let a freshly (re)bound ACM node settle before the first
+                    # write — right after a flap the port opens but the ACE
+                    # side may not be ready to answer yet.
+                    if self.connect_settle_s > 0:
+                        time.sleep(self.connect_settle_s)
                     return True
                 except (serial.SerialException, OSError) as exc:
                     err_str = str(exc)
@@ -351,7 +388,7 @@ class AceTransport:
                     self._ser = None
                     self._resolved_port = None
                     if "No such device" in err_str or "[Errno 19]" in err_str:
-                        time.sleep(0.25)
+                        time.sleep(max(0.25, self.connect_settle_s))
 
             if attempt < retries:
                 time.sleep(retry_delay_s)
@@ -365,9 +402,9 @@ class AceTransport:
         except Exception:
             pass
         self._ser = None
-        # Force the next connect() to re-scan; rear AMS paths renumber after -71 flaps.
-        if self.port.lower() == "auto":
-            self._resolved_port = None
+        # Force the next connect() to re-resolve. Pinned by-id can vanish mid-flap
+        # and must fall back to a scan until udev recreates the alias.
+        self._resolved_port = None
 
     @staticmethod
     def _crc16_mcrf4xx(data: bytes) -> int:
@@ -962,10 +999,12 @@ class AceController:
             "serial_port": transport.get("serial_port"),
             "connected": True,
             "ace": summary,
-            # After the rear AMS link stays up ~10+ minutes, pin this in ace-addon.conf:
-            #   serial_port = /dev/ttyACM1
+            # After the rear AMS link stays up ~10+ minutes, pin this in
+            # ace-addon.conf. Prefer the /dev/serial/by-id alias: it survives
+            # ttyACM renumbering across flaps.
             "pin_hint": (
-                f"serial_port = {transport.get('serial_port')}"
+                f"serial_port = "
+                f"{self.transport.stable_alias_for(transport.get('serial_port')) or transport.get('serial_port')}"
                 if transport.get("serial_port")
                 else None
             ),
@@ -1725,8 +1764,9 @@ def parse_config(path: str) -> configparser.ConfigParser:
                 "read_max_bytes": "4096",
                 "connect_retries": "2",
                 "connect_retry_delay_s": "0.3",
+                "connect_settle_s": "0.15",
                 "rpc_retries": "3",
-                "rpc_retry_delay_s": "0.5",
+                "rpc_retry_delay_s": "0.25",
                 "feed_speed": "25",
                 "retract_speed": "15",
                 "dry_fan_speed": "7000",
@@ -1787,17 +1827,30 @@ def emit_json(payload: Dict[str, Any], always: bool = False) -> None:
         sys.stdout.write("\n")
 
 
+def emit_health_banner(payload: Dict[str, Any]) -> None:
+    """Human-readable ACE_CHECK result. CosmOS may not abort macros on shell
+    non-zero exit, so do not rely on a gcode 'passed' line after RUN_SHELL_COMMAND.
+    """
+    if payload.get("ok", False):
+        port = payload.get("serial_port") or "?"
+        print(f"ACE connection check passed (port={port})", flush=True)
+    else:
+        err = payload.get("error") or payload.get("last_error") or "unknown error"
+        print(f"ACE connection check FAILED: {err}", flush=True)
+
 def run_command(config_path: str, payload: Dict[str, Any]) -> int:
     cfg = parse_config(config_path)
     configure_logging(cfg)
     controller = AceController(cfg, start_heartbeat=False)
     try:
         result = controller.execute(payload)
+        cmd = str(payload.get("cmd", "")).strip().lower()
         emit_json(
             result,
-            always=str(payload.get("cmd", "")).strip().lower()
-            in {"health", "announce_connect", "dry_start", "dry_stop"},
+            always=cmd in {"health", "announce_connect", "dry_start", "dry_stop"},
         )
+        if cmd == "health":
+            emit_health_banner(result)
         return 0 if result.get("ok", False) else 1
     finally:
         controller.close()

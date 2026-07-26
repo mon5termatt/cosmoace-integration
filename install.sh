@@ -8,7 +8,7 @@ KLIPPER_READONLY_DIR="${KLIPPER_CONFIG_DIR}/klipper-readonly"
 KLIPPER_USER_MACROS_CFG="${KLIPPER_CONFIG_DIR}/ace-addon.cfg"
 KLIPPER_ADDON_CFG="${KLIPPER_READONLY_DIR}/ace-addon.cfg"
 
-required_files="files/ace-addon.py files/ace-addon.conf files/ace-command.sh files/ace_macros.cfg files/ace-addon.init files/ace-usb-watch.sh"
+required_files="files/ace-addon.py files/ace-addon.conf files/ace-command.sh files/ace_macros.cfg files/ace-addon.init files/ace-usb-watch.sh files/ace-stability-test.sh files/ace-stress-test.sh"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root."
@@ -38,8 +38,10 @@ echo "Copying files..."
 cp "${SCRIPT_DIR}/files/ace-addon.py" "${ADDON_DIR}/ace-addon.py"
 cp "${SCRIPT_DIR}/files/ace-command.sh" "${ADDON_DIR}/ace-command.sh"
 cp "${SCRIPT_DIR}/files/ace-usb-watch.sh" "${ADDON_DIR}/ace-usb-watch.sh"
+cp "${SCRIPT_DIR}/files/ace-stability-test.sh" "${ADDON_DIR}/ace-stability-test.sh"
+cp "${SCRIPT_DIR}/files/ace-stress-test.sh" "${ADDON_DIR}/ace-stress-test.sh"
 cp "${SCRIPT_DIR}/files/ace_macros.cfg" "${ADDON_DIR}/ace_macros.default.cfg"
-chmod 0755 "${ADDON_DIR}/ace-addon.py" "${ADDON_DIR}/ace-command.sh" "${ADDON_DIR}/ace-usb-watch.sh"
+chmod 0755 "${ADDON_DIR}/ace-addon.py" "${ADDON_DIR}/ace-command.sh" "${ADDON_DIR}/ace-usb-watch.sh" "${ADDON_DIR}/ace-stability-test.sh" "${ADDON_DIR}/ace-stress-test.sh"
 chmod 0644 "${ADDON_DIR}/ace_macros.default.cfg"
 
 if [ ! -f "${KLIPPER_USER_MACROS_CFG}" ]; then
@@ -68,6 +70,16 @@ for level in 0 1 6; do
 done
 if command -v update-rc.d >/dev/null 2>&1; then
     update-rc.d -f ace-addon remove >/dev/null 2>&1 || true
+fi
+
+# Disable USB autosuspend for ACE Pro (VID 28e9 / PID 018a).
+# Match the USB device only — not interfaces (:1.0/:1.1), which reject
+# power/control writes ("Permission denied" from udevd).
+echo "Securing ACE Pro USB connection (disabling auto-suspend)..."
+echo 'ACTION=="add", SUBSYSTEM=="usb", DEVTYPE=="usb_device", ATTR{idVendor}=="28e9", ATTR{idProduct}=="018a", ATTR{power/control}="on"' > /etc/udev/rules.d/99-ace-keepalive.rules
+if command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger || true
 fi
 
 if command -v service >/dev/null 2>&1; then
