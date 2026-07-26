@@ -297,8 +297,8 @@ class AceTransport:
                 free_candidates.append(path)
 
         # Prefer the stable /dev/serial/by-id alias over raw /dev/ttyACM*:
-        # the alias name survives rear-AMS flaps even when the ACM node
-        # renumbers (ttyACM1 -> ttyACM2 ...).
+        # ACM numbering can change at boot (enumeration delays / MCU vs ACE
+        # race) and again on rear-AMS flaps (ttyACM1 -> ttyACM2 ...).
         ace_candidates.sort(key=lambda p: 0 if p.startswith("/dev/serial/by-id/") else 1)
 
         return {
@@ -1023,7 +1023,7 @@ class AceController:
             "ace": summary,
             # After the rear AMS link stays up ~10+ minutes, pin this in
             # ace-addon.conf. Prefer the /dev/serial/by-id alias: it survives
-            # ttyACM renumbering across flaps.
+            # ttyACM renumbering at boot and across flaps.
             "pin_hint": (
                 f"serial_port = "
                 f"{self.transport.stable_alias_for(transport.get('serial_port')) or transport.get('serial_port')}"

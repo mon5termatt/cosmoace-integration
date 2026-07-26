@@ -79,7 +79,7 @@ An Elegoo Centauri Carbon and an Anycubic ACE Pro
 Set your gcode in OrcaSlicer:
 [OrcaSlicer G-Code Guide](docs/ORCA_GCODE.md)
 
-USB link stability, by-id pinning, and the on-printer harness:
+USB keepalive, by-id pinning, and rear-port notes:
 [ACE USB Stability](docs/ACE_USB_STABILITY.md)
 
 ## Install
@@ -201,29 +201,8 @@ While debugging, run the lightweight watcher (manual, not a boot service):
 # logs to /board-resource/ace-usb.log
 ```
 
-#### Stability experiments
-
-Full write-up of by-id pinning, knobs, and measured Centauri numbers:
+Full write-up of by-id pinning, keepalive, and knobs:
 [docs/ACE_USB_STABILITY.md](docs/ACE_USB_STABILITY.md).
-
-`ace-stability-test.sh` quantifies the link instead of guessing (manual start
-only, same resource rules as the watcher). Results append to
-`/board-resource/ace-stability.log`:
-
-```sh
-/user-resource/ace-addon/ace-stability-test.sh all      # full sweep (~3 min)
-/user-resource/ace-addon/ace-stability-test.sh flap 60  # disconnects per minute
-/user-resource/ace-addon/ace-stability-test.sh rpc 20   # health success rate
-/user-resource/ace-addon/ace-stability-test.sh paths    # raw tty vs by-id vs by-path
-/user-resource/ace-addon/ace-stability-test.sh settle   # sweep connect_settle_s
-```
-
-How to read it: `flap` is the hardware baseline (a ferrite/cable/ground fix
-should lower it); `rpc` is what the macros actually experience; `paths` should
-show by-id matching or beating the raw tty — if raw ever loses, the node
-renumbered mid-test and by-id is doing its job; `settle` picks the smallest
-`connect_settle_s` whose ok-rate matches the best one (set it in
-`ace-addon.conf`).
 
 **Symptom cheat sheet**
 
@@ -242,16 +221,17 @@ next USB up-window, and motion commands only go out once, after a retried
 `get_status` probe proves the link is alive.
 
 To pin the path in `ace-addon.conf`, use the **by-id alias** (health prints it
-as `pin_hint`) — its name survives ttyACM renumbering across flaps, so it is
-safe to pin even while the link is still flaky:
+as `pin_hint`) — its name survives ttyACM renumbering at boot and across flaps,
+so it is safe to pin even while the link is still flaky:
 
 ```ini
 serial_port = /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
 ```
 
-Never pin `/dev/ttyACM1` — that node renumbers on every reconnect. The default
-config pins the by-id alias above; only fall back to `serial_port = auto` if
-the by-id name differs on your unit (check health's `pin_hint`).
+Never pin `/dev/ttyACM1` — that node can change at boot from enumeration delays
+(MCU vs ACE) and again on every reconnect. The default config pins the by-id
+alias above; only fall back to `serial_port = auto` if the by-id name differs
+on your unit (check health's `pin_hint`).
 
 #### Board connector pinout (Centauri Carbon, 5-pin)
 

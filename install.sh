@@ -8,7 +8,7 @@ KLIPPER_READONLY_DIR="${KLIPPER_CONFIG_DIR}/klipper-readonly"
 KLIPPER_USER_MACROS_CFG="${KLIPPER_CONFIG_DIR}/ace-addon.cfg"
 KLIPPER_ADDON_CFG="${KLIPPER_READONLY_DIR}/ace-addon.cfg"
 
-required_files="files/ace-addon.py files/ace-addon.conf files/ace-command.sh files/ace_macros.cfg files/ace-addon.init files/ace-usb-watch.sh files/ace-stability-test.sh files/ace-stress-test.sh"
+required_files="files/ace-addon.py files/ace-addon.conf files/ace-command.sh files/ace_macros.cfg files/ace-addon.init files/ace-usb-watch.sh"
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run as root."
@@ -38,10 +38,8 @@ echo "Copying files..."
 cp "${SCRIPT_DIR}/files/ace-addon.py" "${ADDON_DIR}/ace-addon.py"
 cp "${SCRIPT_DIR}/files/ace-command.sh" "${ADDON_DIR}/ace-command.sh"
 cp "${SCRIPT_DIR}/files/ace-usb-watch.sh" "${ADDON_DIR}/ace-usb-watch.sh"
-cp "${SCRIPT_DIR}/files/ace-stability-test.sh" "${ADDON_DIR}/ace-stability-test.sh"
-cp "${SCRIPT_DIR}/files/ace-stress-test.sh" "${ADDON_DIR}/ace-stress-test.sh"
 cp "${SCRIPT_DIR}/files/ace_macros.cfg" "${ADDON_DIR}/ace_macros.default.cfg"
-chmod 0755 "${ADDON_DIR}/ace-addon.py" "${ADDON_DIR}/ace-command.sh" "${ADDON_DIR}/ace-usb-watch.sh" "${ADDON_DIR}/ace-stability-test.sh" "${ADDON_DIR}/ace-stress-test.sh"
+chmod 0755 "${ADDON_DIR}/ace-addon.py" "${ADDON_DIR}/ace-command.sh" "${ADDON_DIR}/ace-usb-watch.sh"
 chmod 0644 "${ADDON_DIR}/ace_macros.default.cfg"
 
 if [ ! -f "${KLIPPER_USER_MACROS_CFG}" ]; then

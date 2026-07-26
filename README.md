@@ -15,24 +15,26 @@ After install, your printer can:
 2. Change colors mid-print (cut, unload, load the next spool, purge, wipe)
 3. Clear the line when the print finishes
 
-You need a filament sensor at the toolhead (Canvas-style CC1). A second sensor
-at the filament hub is optional — nice if you have one, not required.
+You need a filament sensor at the toolhead (Canvas-style CC1). A filament hub
+with **at least one sensor** at the merge point is strongly recommended: the
+hub sensor confirms loads and clears before the long run to the toolhead, so
+toolchanges fail fast instead of blindly feeding or retracting a fixed length.
+Hub-less / no-sensor setups still work, but they rely on longer search budgets
+and blind clears.
+
+Install also starts a low-priority ACE **protocol keepalive** so the rear USB
+link does not drop on the ACE’s ~3.6s idle watchdog. Details:
+[ACE USB Stability](docs/ACE_USB_STABILITY.md).
 
 ## What you need
 
-
-| Item                    | Notes                                                                               |
-| ----------------------- | ----------------------------------------------------------------------------------- |
-| Elegoo Centauri Carbon  | With CosmOS / OpenCentauri installed                                                |
-| Anycubic ACE Pro        | With its own 24V power brick plugged in                                             |
-| ACE signal cable        | The ACE’s **4-pin to 6-pin** cable (not a 4-pin to 4-pin cable)                     |
-| SSH access              | User `root`, password usually `OpenCentauri`                                        |
+| Item | Notes |
+| --- | --- |
+| Elegoo Centauri Carbon | With CosmOS / OpenCentauri installed |
+| Anycubic ACE Pro | With its own 24V power brick plugged in |
+| ACE signal cable | The ACE’s **4-pin to 6-pin** cable (not a 4-pin to 4-pin cable) |
+| SSH access | User `root`, password usually `OpenCentauri` |
 | OrcaSlicer (or similar) | Paste the start / toolchange / end macros from the [Orca guide](docs/ORCA_GCODE.md) |
-
-
-Also print and mount the
-[filament hub adapter](https://www.printables.com/model/1662192-centauri-carbon-multi-material-filament-hub-4-colo)
-so the ACE tubes meet the Centauri’s runout path.
 
 ## Quick install
 
@@ -46,15 +48,12 @@ chmod +x install.sh uninstall.sh
 ./install.sh
 ```
 
-1. Restart Klipper and wait about 45 seconds for it to finish booting:
+The install script restarts Klipper, waits ~45s for load to settle, then starts
+the ACE keepalive service.
 
-```sh
-service klipper restart
-```
-
-1. In the printer console, run `ACE_CHECK`. You want a healthy reply (`ok: true`).
-2. Set the OrcaSlicer start / toolchange / end gcode from the
-  [Orca guide](docs/ORCA_GCODE.md).
+4. In the printer console, run `ACE_CHECK`. You want a healthy reply (`ok: true`).
+5. Set the OrcaSlicer start / toolchange / end gcode from the
+   [Orca guide](docs/ORCA_GCODE.md).
 
 To remove CosmoACE later:
 
@@ -78,8 +77,6 @@ CosmoACE uses the Centauri’s **rear AMS / MMU port**.
 > A plain 4-pin-to-4-pin cable will not talk to the ACE. You need the ACE’s
 > 4-pin-to-6-pin signal cable.
 
-
-
 ### Board harness change (required once)
 
 Inside the printer, the rear port’s board connector needs a one-time wiring
@@ -101,32 +98,27 @@ Without the data-wire swap, the printer often fails to see the ACE at all
 > un-swapped, 5V and 24V restored) first.
 
 Pin-by-pin tables, DIY adapters, and front-USB checks are in the
-[advanced README](README_ADVANCED.md). Flaky USB behavior is covered in
-[ACE USB Stability](docs/ACE_USB_STABILITY.md).
+[advanced README](README_ADVANCED.md).
 
 ## First checks if something’s wrong
 
-
-| What you notice                            | What to try                                                                                              |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
-| ACE LEDs are off                           | Plug in the ACE’s 24V brick and power it on                                                              |
-| Printer never “sees” the ACE               | Reseat both ends of the signal cable; confirm the board data wires were swapped                          |
+| What you notice | What to try |
+| --- | --- |
+| ACE LEDs are off | Plug in the ACE’s 24V brick and power it on |
+| Printer never “sees” the ACE | Reseat both ends of the signal cable; confirm the board data wires were swapped |
 | ACE drops on an exact ~3.6s rhythm | Run `service ace-addon status`; the protocol keepalive must be running |
 | ACE drops irregularly while keepalive runs | Check cable strain, ground, and the rear harness / VBUS |
-| Macros say the sensor is already triggered | Check hub / toolhead sensor wiring, or disable a hub sensor you don’t have                               |
-
+| Macros say the sensor is already triggered | Check hub / toolhead sensor wiring, or disable a hub sensor you don’t have |
 
 From the printer console:
 
 - `ACE_CHECK` — quick “is the ACE talking?” test
 - After a Klipper restart, wait ~45 seconds before trusting that check
 
-For deeper USB debugging (logs, stability tests, why we pin a stable device
-path), see [ACE USB Stability](docs/ACE_USB_STABILITY.md).
+Keepalive, by-id device paths (why not raw `/dev/ttyACM*`), and rear-port notes:
+[ACE USB Stability](docs/ACE_USB_STABILITY.md).
 
 ## Sensors (printer config)
-
-
 
 ### Toolhead sensor (recommended)
 
@@ -142,11 +134,10 @@ insert_gcode:
   _ACE_SENSOR_EVENT EVENT=TOOLHEAD_INSERT
 ```
 
+### Hub sensor (recommended)
 
-
-### Hub sensor (optional)
-
-If you have a sensor at the 4-way merge point:
+Put a sensor at the 4-way merge point so CosmoACE can verify filament in/out
+of the hub instead of guessing with fixed distances:
 
 ```cfg
 [filament_switch_sensor runout]
@@ -163,20 +154,19 @@ insert_gcode:
 Important:
 
 - Set `pause_on_runout: False` on both. CosmoACE moves filament past these
-sensors on purpose during a toolchange; Klipper’s own pause would fight that.
+  sensors on purpose during a toolchange; Klipper’s own pause would fight that.
 - If your sensor names differ, update `variable_sensor_name` and
-`variable_toolhead_sensor_name` in `/etc/klipper/config/ace-addon.cfg`.
+  `variable_toolhead_sensor_name` in `/etc/klipper/config/ace-addon.cfg`.
 
-
-
-### No hub sensor
+### No hub sensor (fallback)
 
 Remove the hub `[filament_switch_sensor runout]` block entirely (or set
 `variable_sensor_name: ""`). Do not leave the section in place with nothing
 plugged in — a floating wire can look “always triggered.”
 
 Without a hub sensor, loads search all the way to the toolhead, and unloads
-pull a fixed extra length past the merge point. Details and panel buttons:
+pull a fixed extra length past the merge point. That works, but missed clears
+and overruns are harder to catch. Details and panel buttons:
 [ACE Macro Reference](docs/ACE_MACROS.md).
 
 ## Distances to tune
@@ -185,15 +175,13 @@ These live in `/etc/klipper/config/ace-addon.cfg`. With a toolhead sensor,
 loading stops when the switch trips, so most values are just “search budgets”
 that need to be longer than the real tube path:
 
-
-| Setting                                    | Default | Plain meaning                                     |
-| ------------------------------------------ | ------- | ------------------------------------------------- |
-| `variable_load_to_toolhead_search_mm`      | `900`   | Max search from hub sensor → toolhead             |
-| `variable_load_past_toolhead_mm`           | `15`    | Extra push to seat filament in the extruder gears |
-| `variable_unload_from_toolhead_search_mm`  | `200`   | Max retract to clear the toolhead switch          |
-| `variable_load_to_toolhead_full_search_mm` | `2200`  | Hub-less: ACE → toolhead in one go                |
-| `variable_unload_past_hub_mm`              | `950`   | Hub-less: extra retract past the merge point      |
-
+| Setting | Default | Plain meaning |
+| --- | --- | --- |
+| `variable_load_to_toolhead_search_mm` | `900` | Max search from hub sensor → toolhead |
+| `variable_load_past_toolhead_mm` | `15` | Extra push to seat filament in the extruder gears |
+| `variable_unload_from_toolhead_search_mm` | `200` | Max retract to clear the toolhead switch |
+| `variable_load_to_toolhead_full_search_mm` | `2200` | Hub-less: ACE → toolhead in one go |
+| `variable_unload_past_hub_mm` | `950` | Hub-less: extra retract past the merge point |
 
 A little too long is usually fine. Too short fails loads or leaves filament
 in the hub.
@@ -206,5 +194,4 @@ Your printer should already have tray / wipe / pause helpers CosmoACE calls:
 - [Advanced README](README_ADVANCED.md) — pinouts, manual install, TODOs, and detailed specs
 - [OrcaSlicer G-Code](docs/ORCA_GCODE.md) — what to paste into the slicer
 - [ACE Macro Reference](docs/ACE_MACROS.md) — every macro and config variable
-- [ACE USB Stability](docs/ACE_USB_STABILITY.md) — flaky rear port, logs, and tests
-
+- [ACE USB Stability](docs/ACE_USB_STABILITY.md) — keepalive, by-id pinning, and rear-port notes
