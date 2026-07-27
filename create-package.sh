@@ -22,6 +22,9 @@ tar -C "${SCRIPT_DIR}" -czf "${DIST_DIR}/${PKG}" \
     files/ace-command.sh \
     files/ace-addon.init \
     files/ace-usb-watch.sh \
+    files/disable_cosmos_stock_filament_sensor.py \
+    files/ace-setup.py \
+    files/ace-setup-restart.sh \
     files/ace_macros.cfg \
 
 echo "Created ${DIST_DIR}/${PKG}"

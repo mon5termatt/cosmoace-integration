@@ -37,8 +37,27 @@ by-id pinning, and knobs: [ACE USB Stability](ACE_USB_STABILITY.md).
   alive, so a retry can never double a movement.
 
 Use `ACE_CHECK` from the console to verify the link end to end before starting a print.
+It prints a short `ACE: Connected` / `ACE: Not connected (...)` line (no JSON dump).
 On Klipper start, `_ACE_ANNOUNCE_CONNECT` opens the ACE serial port the same way
 BunnyACE does and echoes `ACE: Connected {model} {firmware}` once `get_info` succeeds.
+
+## ACE Initial Setup Wizard
+
+First-install UI prompts (CosmOS `action:prompt_*`) unless
+`/user-resource/ace-addon/setup_complete` exists. Helper: `files/ace-setup.py`
+(installed as `/user-resource/ace-addon/ace-setup.py`).
+
+| Macro | Role |
+| --- | --- |
+| `ACE_INITIAL_SETUP` | Start or resume the wizard. Clears completion and starts over unless a failed lane test is still active (then shows Retry/Stop/Exit). |
+| `ACE_SETUP_RETRY` | Re-show the current lane prompt after a failure. |
+| `_ACE_SETUP_BOOT` | Delayed gcode (~12s after Klipper start): consume resume after hub/hub-less config restart, else launch first-run setup. |
+| `_ACE_SETUP_TEST_LANE` | Safe lane cycle: `_ACE_LOAD_TO_SENSOR` @ 8 mm/s, `_ACE_UNLOAD_TO_SENSOR`, `_ACE_CLEAR_HUB`, verify clear. Does not advance on error. |
+| `_ACE_SETUP_EXIT` / `_ACE_SETUP_STOP` | Leave `setup_complete` unset so the prompt can return after restart. |
+
+Motion limits match production helpers (`load_to_sensor_search_mm` = 1200). After a
+full `service klipper restart`, wait ~45s before expecting the wizard resume.
+After `FIRMWARE_RESTART`, wait ~20–30s.
 
 ## Config Variables
 
@@ -46,7 +65,7 @@ Edit these in `/etc/klipper/config/ace-addon.cfg`.
 
 | Variable | Default | Used by | Purpose |
 | --- | ---: | --- | --- |
-| `variable_sensor_name` | `runout` | Hub load/unload macros | Hub filament sensor object name. Set to `""` if you have no hub sensor — loads then search all the way to the toolhead sensor and unloads use the blind hub clear. |
+| `variable_sensor_name` | `HUB` | Hub load/unload macros | Hub filament sensor object name. Set to `""` if you have no hub sensor — loads then search all the way to the toolhead sensor and unloads use the blind hub clear. |
 | `variable_toolhead_sensor_name` | `toolhead_runout_sensor` | Toolhead load/unload macros | Toolhead filament sensor object name. Set to `""` if you have no toolhead sensor — loads fall back to the blind `load_to_printhead_mm` push. |
 | `variable_load_to_sensor_search_mm` | `1200` | `ACE_LOAD_TO_SENSOR`, `_ACE_ORCA_START`, `_ACE_ORCA_TOOLCHANGE` | Max distance to search for the hub sensor while loading. |
 | `variable_load_to_toolhead_search_mm` | `900` | `ACE_LOAD_TO_TOOLHEAD`, `ACE_LOAD_TO_PRINTHEAD` | Max distance to search for the toolhead sensor when starting from the hub. |
@@ -91,8 +110,12 @@ These are the commands you normally use from the console or call from slicer G-c
 
 | Macro | What it does | Inputs |
 | --- | --- | --- |
-| `ACE_SET_SENSOR_NAME` | Changes which `filament_switch_sensor` object the addon watches as the hub sensor. | `NAME` |
-| `ACE_STATUS` | Prints the current ACE mode, slot state, hub and toolhead sensor states, and saved return position. | none |
+| `ACE_SET_SENSOR_NAME` | Changes which `filament_switch_sensor` object the addon watches as the hub sensor. `NAME=""` selects hub-less mode. | `NAME` |
+| `ACE_ENABLE_SENSORS` | Enables the configured hub and/or toolhead filament sensors (`SET_FILAMENT_SENSOR`). | optional `TARGET=all\|hub\|toolhead` |
+| `ACE_DISABLE_SENSORS` | Disables those sensors (silences runout/insert events; ACE motion macros that poll sensors still see live pin state via Moonraker). | optional `TARGET=all\|hub\|toolhead` |
+| `ACE_INITIAL_SETUP` | Guided first-install hub / hub-less wizard and lane-to-hub tests. Clears `setup_complete` when starting fresh. | optional `FORCE` |
+| `ACE_SETUP_RETRY` | Re-open the current setup lane prompt after a failed test. | none |
+| `ACE_STATUS` | Prints the current ACE mode, slot state, hub and toolhead sensor states, `sensors_enabled`, and saved return position. | none |
 | `ACE_CHECK` | Verifies the ACE serial connection with a status round-trip. The addon retries through brief USB disconnects, so a flaky link that recovers still passes. | none |
 | `ACE_SLOT_STATUS` | Queries the addon service for the selected slot's readiness. | `SLOT` |
 | `ACE_DRY_START` | Starts the ACE's built-in filament dryer. `TEMP` is 1–65 °C (ACE Pro hardware max is usually 55). `DURATION` and `MINUTES` are aliases. | optional `TEMP`, `DURATION`/`MINUTES`, `FAN` |
@@ -217,7 +240,7 @@ Your printer config should call the hidden sensor event macro from each sensor y
 Hub sensor (optional — at the 4-way merge point):
 
 ```cfg
-[filament_switch_sensor runout]
+[filament_switch_sensor HUB]
 pause_on_runout: False
 runout_gcode:
   _ACE_SENSOR_EVENT EVENT=RUNOUT

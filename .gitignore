@@ -1,3 +1,5 @@
 dist/
+backups/
+.cursor/
 *.tar.gz
 __pycache__/

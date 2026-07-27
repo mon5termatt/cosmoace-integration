@@ -105,13 +105,13 @@ If you prefer to install manually or the script encounters issues with your spec
 2. **Create Directories:**
    ```sh
    mkdir -p /user-resource/ace-addon
-   mkdir -p /etc/klipper/config/klipper-readonly
    ```
 3. **Copy Files:**
    ```sh
    cp files/ace-addon.py /user-resource/ace-addon/
    cp files/ace-command.sh /user-resource/ace-addon/
    cp files/ace-usb-watch.sh /user-resource/ace-addon/
+   cp files/ace-setup.py /user-resource/ace-addon/
    cp files/ace-addon.conf /user-resource/ace-addon/
    cp files/ace-addon.init /etc/init.d/ace-addon
    chmod +x /etc/init.d/ace-addon
@@ -119,10 +119,12 @@ If you prefer to install manually or the script encounters issues with your spec
    # Hub-less only: expose ACE_BLIND_CLEAR_HUB on the Mainsail panel
    # cp files/ace_macros_nohub_panel.cfg /etc/klipper/config/
    ```
-4. **Set Permissions & Symlink:**
+4. **Set Permissions & durable include:**
    ```sh
    chmod +x /user-resource/ace-addon/*.sh /user-resource/ace-addon/*.py
-   ln -sfn /etc/klipper/config/ace-addon.cfg /etc/klipper/config/klipper-readonly/ace-addon.cfg
+   # Do NOT symlink into klipper-readonly — CosmOS wipes that overlay on flash /
+   # readonly-config-reset / A-B updates. Load macros from printer.cfg instead:
+   python3 /user-resource/ace-addon/ace-setup.py ensure_macros_include
    ```
    If you installed `ace_macros_nohub_panel.cfg` (hub-less), add this to `ace-addon.cfg`
    (or your printer config) so the panel button is loaded — **do not** add it when a
@@ -297,11 +299,43 @@ whatever `/dev/ttyACM0` Klipper already owns.
 
 ## Required Printer Config
 
-The hub sensor is optional. If you have one at the 4-way merge point, configure it — it
-gives immediate hub-clear confirmation on toolchanges:
+CosmOS may define `[filament_switch_sensor filament_sensor]` in
+`klipper-readonly/machine.cfg` (typically `PC0`). CosmoACE `install.sh`
+disables that section so it cannot fight toolchanges or collide with the hub
+sensor. Restore from `machine.cfg.pre-cosmoace.bak` if you uninstall ACE.
+
+### ACE Initial Setup wizard
+
+After install, `_ACE_SETUP_BOOT` launches `ACE_INITIAL_SETUP` unless
+`/user-resource/ace-addon/setup_complete` exists (preserved across upgrades).
+
+`ace-hardware.cfg` owns every ACE hardware section: the hub sensor, the toolhead
+filament sensor, and the toolhead buttons. `printer.cfg` only carries
+`[include ace-hardware.cfg]`; active duplicates found there are commented out.
+
+- **Hub installed:** `ace-setup.py` writes managed `ace-hardware.cfg` (HUB on
+  `^PC0` plus the toolhead hardware), sets `variable_sensor_name: "HUB"`, queues
+  resume, and restarts Klipper (~45s recovery). Then lanes 1–4 are tested one at
+  a time: feed at 8 mm/s up to `load_to_sensor_search_mm` (1200), unload, and
+  `_ACE_CLEAR_HUB`. Failures do not advance; use Retry / Stop / Exit. Exit leaves
+  completion unset.
+- **No hub:** managed hub-less config keeps the toolhead hardware but omits the
+  hub section, sets `variable_sensor_name: ""`, restarts, and finishes with
+  guidance that lane-to-hub tests are unavailable.
+- Setup refuses to run while printing or paused.
+- Manual re-run: `ACE_INITIAL_SETUP` (clears the completion marker).
+
+Uninstall removes ACE services and macros include. By default it also removes
+`ace-hardware.cfg`; answer **y** when prompted (or set `KEEP_CANVAS=1`) to write
+`canvas.cfg` (toolhead runout/cutter/front-cover, no ACE hooks) and
+`[include canvas.cfg]`. Sensor name restore goes through
+`ace-setup.py remove_managed`.
+
+The hub sensor is optional. If you have one at the 4-way merge point, configure it
+via the wizard or manually — it gives immediate hub-clear confirmation on toolchanges:
 
 ```cfg
-[filament_switch_sensor runout]
+[filament_switch_sensor HUB]
 switch_pin: PC0
 pause_on_runout: False
 event_delay: 0.2
@@ -328,13 +362,14 @@ Notes:
 - `pause_on_runout` must be `False` on both sensors. The ACE macros retract past them on
   purpose, and Klipper's own pause handling would fight the toolchange.
 - The macro name must be `_ACE_SENSOR_EVENT`.
-- If your sensor objects are not named `runout` and `toolhead_runout_sensor`, update
+- If your sensor objects are not named `HUB` and `toolhead_runout_sensor`, update
   `variable_sensor_name` and `variable_toolhead_sensor_name` in `ace-addon.cfg`.
 
 ### Running without a hub sensor
 
-To go toolhead-sensor-only, remove the `[filament_switch_sensor runout]` section from
-`printer.cfg` entirely (or set `variable_sensor_name: ""` in `ace-addon.cfg`). Do not leave
+To go toolhead-sensor-only, re-run the wizard and choose **No hub**, which rewrites
+`ace-hardware.cfg` without the `[filament_switch_sensor HUB]` section (or set
+`variable_sensor_name: ""` in `ace-addon.cfg` by hand). Do not leave
 the section configured with the switch unplugged — a floating pin can read as permanently
 triggered and the macros will trust it.
 
@@ -385,3 +420,8 @@ it is still the critical value: too short and the filament won't reach, too long
 cd /user-resource/.tmp/cosmoace-integration
 ./uninstall.sh
 ```
+
+Interactive prompt: keep Canvas toolhead runout sensor + cutter/front-cover
+buttons (writes `canvas.cfg` + `[include canvas.cfg]`, removes `ace-hardware.cfg`),
+or remove all managed ACE hardware. Non-interactive: `KEEP_CANVAS=1 ./uninstall.sh`
+or `KEEP_CANVAS=0`.

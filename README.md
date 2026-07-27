@@ -51,8 +51,12 @@ chmod +x install.sh uninstall.sh
 The install script restarts Klipper, waits ~45s for load to settle, then starts
 the ACE keepalive service.
 
-4. In the printer console, run `ACE_CHECK`. You want a healthy reply (`ok: true`).
-5. Set the OrcaSlicer start / toolchange / end gcode from the
+4. After the first restart, the **ACE Initial Setup** prompt appears on the
+   printer UI (unless a previous install already created
+   `/user-resource/ace-addon/setup_complete`). Choose hub or hub-less, then
+   follow the lane tests. You can re-run anytime with `ACE_INITIAL_SETUP`.
+5. In the printer console, run `ACE_CHECK`. You want a healthy reply (`ok: true`).
+6. Set the OrcaSlicer start / toolchange / end gcode from the
    [Orca guide](docs/ORCA_GCODE.md).
 
 To remove CosmoACE later:
@@ -61,6 +65,11 @@ To remove CosmoACE later:
 cd /user-resource/.tmp/cosmoace-integration
 ./uninstall.sh
 ```
+
+The script asks whether to keep Canvas toolhead runout/cutter hardware after ACE
+is gone (writes `/etc/klipper/config/canvas.cfg` and
+`[include canvas.cfg]`). For non-interactive uninstalls:
+`KEEP_CANVAS=1 ./uninstall.sh`.
 
 If the install script fails on your firmware, see the
 [advanced README](README_ADVANCED.md) for a full manual install.
@@ -108,11 +117,12 @@ Pin-by-pin tables, DIY adapters, and front-USB checks are in the
 | Printer never “sees” the ACE | Reseat both ends of the signal cable; confirm the board data wires were swapped |
 | ACE drops on an exact ~3.6s rhythm | Run `service ace-addon status`; the protocol keepalive must be running |
 | ACE drops irregularly while keepalive runs | Check cable strain, ground, and the rear harness / VBUS |
-| Macros say the sensor is already triggered | Check hub / toolhead sensor wiring, or disable a hub sensor you don’t have |
+| Macros say the sensor is already triggered | Check hub / toolhead sensor wiring, or `ACE_DISABLE_SENSORS TARGET=hub` if you don’t have a hub |
 
 From the printer console:
 
 - `ACE_CHECK` — quick “is the ACE talking?” test
+- `ACE_INITIAL_SETUP` — re-run the hub / lane setup wizard
 - After a Klipper restart, wait ~45 seconds before trusting that check
 
 Keepalive, by-id device paths (why not raw `/dev/ttyACM*`), and rear-port notes:
@@ -120,9 +130,36 @@ Keepalive, by-id device paths (why not raw `/dev/ttyACM*`), and rear-port notes:
 
 ## Sensors (printer config)
 
+All ACE hardware sections — the hub sensor, the toolhead filament sensor, and
+the toolhead buttons — live in managed
+`/etc/klipper/config/ace-hardware.cfg`, written by `ACE_INITIAL_SETUP`. Your
+`printer.cfg` only needs `[include ace-hardware.cfg]`, which the wizard adds. If
+it finds active copies of those sections in `printer.cfg`, it comments them out,
+since Klipper refuses to start on a duplicate section.
+
+The blocks below document what the managed file contains. Only add them by hand
+if you are not using the wizard — re-running it overwrites `ace-hardware.cfg`.
+
+### CosmOS stock filament sensor (remove)
+
+CosmOS may ship `[filament_switch_sensor filament_sensor]` in
+`klipper-readonly/machine.cfg` on `PC0` with pause-on-runout behavior. That
+fights ACE toolchanges and conflicts with the ACE hub sensor on the same pin.
+`install.sh` comments that section out automatically (backup:
+`machine.cfg.pre-cosmoace.bak`).
+
+CosmOS print macros still *look up* an object named `filament_sensor`. After
+removing the stock section, either:
+
+- name your toolhead sensor `filament_sensor` and set
+  `variable_toolhead_sensor_name: "filament_sensor"` in `ace-addon.cfg`, or
+- keep `toolhead_runout_sensor` and accept that CosmOS START_PRINT filament
+  checks need a matching rename/override.
+
 ### Toolhead sensor (recommended)
 
-On a post-Canvas CC1 toolhead, add something like:
+Written into `ace-hardware.cfg` in both hub and hub-less mode. On a post-Canvas
+CC1 toolhead it looks like:
 
 ```cfg
 [filament_switch_sensor toolhead_runout_sensor]
@@ -136,12 +173,16 @@ insert_gcode:
 
 ### Hub sensor (recommended)
 
-Put a sensor at the 4-way merge point so CosmoACE can verify filament in/out
-of the hub instead of guessing with fixed distances:
+Prefer **ACE Initial Setup** (`ACE_INITIAL_SETUP`): answering “Yes, hub installed”
+writes managed `/etc/klipper/config/ace-hardware.cfg` (HUB on `^PC0`, plus the
+toolhead sensor and buttons), sets `variable_sensor_name: "HUB"`, restarts
+Klipper, then walks lanes 1–4 (slow feed to the hub, then retract until clear).
+
+The hub section it writes:
 
 ```cfg
-[filament_switch_sensor runout]
-switch_pin: PC0
+[filament_switch_sensor HUB]
+switch_pin: ^PC0
 pause_on_runout: False
 event_delay: 0.2
 debounce_delay: 0.02
@@ -157,12 +198,17 @@ Important:
   sensors on purpose during a toolchange; Klipper’s own pause would fight that.
 - If your sensor names differ, update `variable_sensor_name` and
   `variable_toolhead_sensor_name` in `/etc/klipper/config/ace-addon.cfg`.
+- Temporarily silence runout/insert events with `ACE_DISABLE_SENSORS` /
+  `ACE_ENABLE_SENSORS` (optional `TARGET=all|hub|toolhead`). Check
+  `sensors_enabled` via `ACE_STATUS`.
 
 ### No hub sensor (fallback)
 
-Remove the hub `[filament_switch_sensor runout]` block entirely (or set
-`variable_sensor_name: ""`). Do not leave the section in place with nothing
-plugged in — a floating wire can look “always triggered.”
+Choose **No hub** in ACE Initial Setup, which writes an `ace-hardware.cfg` that
+keeps the toolhead hardware but omits the hub section, and sets
+`variable_sensor_name: ""`. Do not leave
+the section in place with nothing plugged in — a floating wire can look
+“always triggered.”
 
 Without a hub sensor, loads search all the way to the toolhead, and unloads
 pull a fixed extra length past the merge point. That works, but missed clears

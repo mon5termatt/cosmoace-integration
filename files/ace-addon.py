@@ -8,6 +8,7 @@ import glob
 import json
 import logging
 import os
+import socket
 import sys
 import threading
 import time
@@ -782,7 +783,7 @@ class AceController:
         self.lock_path = (
             cfg.get("ace", "lock_path", fallback=DEFAULT_LOCK_PATH).strip() or DEFAULT_LOCK_PATH
         )
-        self.sensor_name = cfg.get("klipper", "sensor_name", fallback="runout").strip() or "runout"
+        self.sensor_name = cfg.get("klipper", "sensor_name", fallback="HUB").strip() or "HUB"
         self.last_ace_status: Optional[Dict[str, Any]] = None
         self.last_ace_status_unix: float = 0.0
         self.last_command: Optional[Dict[str, Any]] = None
@@ -1096,9 +1097,8 @@ class AceController:
             banner = f"ACE: Connected {model}"
             if firmware:
                 banner = f"{banner} {firmware}"
-            banner = f"{banner} (port={port})"
-            print(banner, flush=True)
-            logging.info(banner)
+            emit_console_banner(banner)
+            logging.info("%s (port=%s)", banner, port)
             return {
                 "ok": True,
                 "message": banner,
@@ -1109,9 +1109,12 @@ class AceController:
                 "ace": health.get("ace"),
             }
 
+        err = f"ACE: Not connected ({last_error})"
+        emit_console_banner(err)
         return {
             "ok": False,
             "error": f"ACE did not connect within {timeout_s:.0f}s ({last_error})",
+            "message": err,
             "elapsed_ms": int((time.time() - started) * 1000.0),
         }
 
@@ -1800,7 +1803,7 @@ def parse_config(path: str) -> configparser.ConfigParser:
                 "log_path": "/board-resource/ace-addon.log",
             },
             "klipper": {
-                "sensor_name": "runout",
+                "sensor_name": "HUB",
             },
             "moonraker": {
                 "url": "http://127.0.0.1:7125",
@@ -1845,6 +1848,46 @@ def resolve_config_path(cli_path: Optional[str]) -> str:
     return DEFAULT_CONFIG_PATH
 
 
+def klippy_echo(msg: str, sock_path: str = "/run/klippy.sock") -> bool:
+    """Queue a console echo via Klipper's API socket without waiting for a reply.
+
+    Used so ACE_CHECK / boot announce can stay on a non-verbose shell command
+    (no "Running Command" / "finished" wrappers) while still showing a one-line
+    Connected banner in Mainsail. Fire-and-forget avoids deadlocking the gcode
+    processor that is blocked inside RUN_SHELL_COMMAND.
+    """
+    safe = "".join(ch for ch in str(msg) if ch not in '"\n\r')
+    if not safe:
+        return False
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(0.4)
+        sock.connect(sock_path)
+        req = {
+            "id": 99,
+            "method": "gcode/script",
+            "params": {"script": f'RESPOND TYPE=echo MSG="{safe}"'},
+        }
+        sock.sendall(json.dumps(req).encode() + b"\x03")
+        sock.close()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logging.debug("klippy_echo failed: %s", exc)
+        return False
+
+
+def emit_console_banner(msg: str) -> None:
+    """Show a one-line Connected/Not-connected banner.
+
+    Always queue a Klippy RESPOND (visible in Mainsail without shell verbose
+    wrappers) and also print to stdout for SSH/CLI. Under RUN_SHELL_COMMAND with
+    verbose=False the stdout copy is discarded, so the console only gets the
+    injected line — no "Running Command" / "finished" noise.
+    """
+    klippy_echo(msg)
+    print(msg, flush=True)
+
+
 def emit_json(payload: Dict[str, Any], always: bool = False) -> None:
     if always or not payload.get("ok", False):
         json.dump(payload, sys.stdout, indent=2, sort_keys=True)
@@ -1856,11 +1899,11 @@ def emit_health_banner(payload: Dict[str, Any]) -> None:
     non-zero exit, so do not rely on a gcode 'passed' line after RUN_SHELL_COMMAND.
     """
     if payload.get("ok", False):
-        port = payload.get("serial_port") or "?"
-        print(f"ACE connection check passed (port={port})", flush=True)
+        emit_console_banner("ACE: Connected")
     else:
         err = payload.get("error") or payload.get("last_error") or "unknown error"
-        print(f"ACE connection check FAILED: {err}", flush=True)
+        emit_console_banner(f"ACE: Not connected ({err})")
+
 
 def run_command(config_path: str, payload: Dict[str, Any]) -> int:
     cfg = parse_config(config_path)
@@ -1869,12 +1912,16 @@ def run_command(config_path: str, payload: Dict[str, Any]) -> int:
     try:
         result = controller.execute(payload)
         cmd = str(payload.get("cmd", "")).strip().lower()
-        emit_json(
-            result,
-            always=cmd in {"health", "announce_connect", "dry_start", "dry_stop"},
-        )
+        # Connect/health: short banners only (announce prints its own line).
+        # Dryer/slot queries: always JSON. Other cmds: JSON only on failure.
         if cmd == "health":
             emit_health_banner(result)
+        elif cmd == "announce_connect":
+            pass
+        elif cmd in {"dry_start", "dry_stop", "slot_status"}:
+            emit_json(result, always=True)
+        else:
+            emit_json(result)
         return 0 if result.get("ok", False) else 1
     finally:
         controller.close()

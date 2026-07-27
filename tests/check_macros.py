@@ -29,7 +29,7 @@ GCODE_KEYS = (
     "immediate_runout_gcode",
 )
 
-HUB_SENSOR_OBJECT = "filament_switch_sensor runout"
+HUB_SENSOR_OBJECT = "filament_switch_sensor HUB"
 TOOLHEAD_SENSOR_OBJECT = "filament_switch_sensor toolhead_runout_sensor"
 
 
@@ -103,6 +103,7 @@ def build_printer(toolhead_present=True, hub=1, toolhead=0, hub_present=True):
             "last_error": "",
             "sensor_state": hub,
             "toolhead_sensor_state": toolhead,
+            "sensors_enabled": 1,
             "return_x": 0.0,
             "return_y": 0.0,
             "return_z": 0.0,
