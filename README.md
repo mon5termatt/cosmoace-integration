@@ -1,7 +1,8 @@
 # NB! 
 
-CosmoACE is moving to an afc implementation as the Cosmos team has since added afc as standard for the Canvas. <br>I will leave this repo up, however do note that I will no longer be actively maintaining it.
-<br>The new implementation is a work and progress and lives here now -> https://github.com/shawn-makes-stuff/cosmoace_afc
+CosmoACE is transitioning to an AFC implementation, as the Cosmos team has added AFC as standard for the Canvas.
+<br>While this repository will remain available, it will no longer be actively maintained.
+<br>The new implementation is currently a work in progress and can be found here: [shawn-makes-stuff/cosmoace_afc.](https://github.com/shawn-makes-stuff/cosmoace_afc )
 
 # CosmoACE Integration
 
