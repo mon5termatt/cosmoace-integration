@@ -1,3 +1,8 @@
+# NB! 
+
+CosmoACE is moving to an afc implementation as the Cosmos team has since added afc as standard for the Canvas. <br>I will leave this repo up, however do note that I will no longer be actively maintaining it.
+<br>The new implementation is a work and progress and lives here now -> https://github.com/shawn-makes-stuff/cosmoace_afc
+
 # CosmoACE Integration
 
 CosmoACE is a lightweight Anycubic ACE Pro add-on for COSMOS on the Elegoo Centauri Carbon.
