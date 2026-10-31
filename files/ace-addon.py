@@ -10,6 +10,7 @@ import logging
 import logging.handlers
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -287,21 +288,28 @@ class AceTransport:
                     # exclusive: flock the tty so a command and the keep-alive
                     # poller can never talk over each other - the loser gets a
                     # clean "port busy" error instead of corrupted frames.
+                    # SIGALRM: a dead CDC node can block open() until the 180s
+                    # gcode_shell_command timeout, which stalls G28 behind it.
+                    def _open_serial(**kwargs):
+                        def _alarm(_signum, _frame):
+                            raise OSError("serial open timed out")
+                        prev = signal.signal(signal.SIGALRM, _alarm)
+                        signal.alarm(2)
+                        try:
+                            return serial.Serial(
+                                target_port,
+                                self.baudrate,
+                                timeout=self.command_timeout_s,
+                                write_timeout=self.command_timeout_s,
+                                **kwargs,
+                            )
+                        finally:
+                            signal.alarm(0)
+                            signal.signal(signal.SIGALRM, prev)
                     try:
-                        self._ser = serial.Serial(
-                            target_port,
-                            self.baudrate,
-                            timeout=self.command_timeout_s,
-                            write_timeout=self.command_timeout_s,
-                            exclusive=True,
-                        )
+                        self._ser = _open_serial(exclusive=True)
                     except TypeError:  # pyserial too old for exclusive=
-                        self._ser = serial.Serial(
-                            target_port,
-                            self.baudrate,
-                            timeout=self.command_timeout_s,
-                            write_timeout=self.command_timeout_s,
-                        )
+                        self._ser = _open_serial()
                     # Each CLI invocation restarts request ids at 0; drop any
                     # stale frames a previous invocation left in the tty buffer
                     # so they can't be matched against this process's requests.
@@ -314,11 +322,15 @@ class AceTransport:
                     return True
                 except (serial.SerialException, OSError) as exc:
                     err_str = str(exc)
-                    if "No such device" in err_str or "[Errno 19]" in err_str:
-                        time.sleep(2.0)
                     self.last_error = f"connect failed: {exc}"
                     self._ser = None
-            
+                    # Dead USB: fail fast. Retrying here holds the gcode queue
+                    # (ace_rpc timeout is 180s) so G28/home never start.
+                    if "Input/output error" in err_str or "[Errno 5]" in err_str or "timed out" in err_str:
+                        return False
+                    if "No such device" in err_str or "[Errno 19]" in err_str:
+                        time.sleep(2.0)
+
             if attempt < retries:
                 time.sleep(retry_delay_s)
         
@@ -1521,7 +1533,7 @@ def run_status(config_path: str, refresh: bool, compact: bool = False) -> int:
             # show anything mid-print, when injecting gcode to ask us is not
             # acceptable. Best effort: a failure here must not fail the query.
             cached = dict(status)
-            cached["updated_unix"] = int(time.time())
+            cached["updated_unix"] = time.time()
             c0.moonraker._request_json("POST", "/server/database/item", {
                 "namespace": "cosmoace", "key": "status", "value": cached,
             })

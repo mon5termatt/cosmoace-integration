@@ -520,7 +520,7 @@
     }
 
     function loadPanels() {
-        fetch('/addons/manifest.json')
+        fetch('/addons/manifest.json?_=' + Date.now())
             .then(function (r) {
                 return r.json()
             })
