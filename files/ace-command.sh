@@ -97,9 +97,18 @@ case "${cmd}" in
         ace status --refresh
         ;;
     panel-status)
-        # compact status for the web panel: slots and defaults for every unit,
-        # no transport debug (the full dump gets truncated in the gcode console)
-        ace status --refresh --compact
+        # compact status for the web panel. Runs in the background so
+        # RUN_SHELL_COMMAND returns immediately and does not sit on Klipper's
+        # gcode queue for a USB round-trip (that used to stall G28 behind a
+        # dead ACE for up to 180s). The panel polls the moonraker db cache
+        # that --compact writes. flock: one refresh at a time.
+        # Redirect the whole subshell — if it inherits the shell-command
+        # stdout pipe, Klipper waits for EOF until the USB work finishes.
+        (
+            flock -n 8 || exit 0
+            ace status --refresh --compact || true
+        ) 8>/var/run/ace-panel-status.lock </dev/null >/dev/null 2>&1 &
+        echo '{"ok":true,"async":true}'
         ;;
     slot-status)
         ace command --cmd slot_status --slot "${2:-1}"

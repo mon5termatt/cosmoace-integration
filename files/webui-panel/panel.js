@@ -38,6 +38,12 @@
     var dryDefaults = { t: 45, m: 240 } // from ace-addon.conf via status
     var slotCfgs = {} // manual slot info from the moonraker db
     var renderFn = null, pollTimer = null
+    // panel-status is async (shell returns immediately; work writes the
+    // moonraker db). rpcInFlight covers the DB poll window so we don't stack
+    // kicks. After a USB I/O failure, back off gcode kicks for 5 minutes.
+    var rpcInFlight = false
+    var skipGcodeUntil = 0
+    var lastDbUnix = 0
 
     var esc = function (s) {
         return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -183,16 +189,30 @@
                 var stale = v.updated_unix &&
                     Date.now() / 1000 - v.updated_unix > 30
                 applyStatus(v, '')
+                if (v.updated_unix) lastDbUnix = v.updated_unix
                 if (!stale) online = true
                 return stale ? 'stale' : 'fresh'
             })
             .catch(function () { return false })
     }
-    // Fallback: run "ace_rpc panel-status" and read the JSON it prints from
-    // the gcode_store. Skipped while printing - injecting gcode mid-print
-    // stalls the queue briefly, and the db path covers that case.
+    function aceUnreachable(msg) {
+        return /configure port|Input\/output error|Errno 5|No such device|timed out|not responding/i.test(
+            String(msg || ''))
+    }
+    // Wait until panel-status's background job rewrites the moonraker cache.
+    function pollDbUpdated(ctx, beforeUnix, deadline) {
+        return readDb(ctx).then(function (got) {
+            if (got && lastDbUnix > beforeUnix) return got
+            if (Date.now() > deadline) throw new Error('No reply from the ACE addon')
+            return new Promise(function (res) { setTimeout(res, 500) })
+                .then(function () { return pollDbUpdated(ctx, beforeUnix, deadline) })
+        })
+    }
+    // Kick an async panel-status (shell returns immediately) and wait on the
+    // moonraker db cache it writes. Skipped while printing — the db path
+    // covers mid-print reads without touching the gcode queue.
     function refresh(ctx) {
-        if (busy) return
+        if (busy || rpcInFlight) return
         busy = true
         lastFull = Date.now()
         err = ''
@@ -200,49 +220,34 @@
         queryPrinter(ctx).then(function () {
             return readDb(ctx).then(function (got) {
                 if (got === 'fresh' || printing) return
-                var t0 = 0
-                return ctx.apiGet('/server/gcode_store?count=1')
-                    .then(function (r) {
-                        var e = (r.result.gcode_store || [])[0]
-                        t0 = e ? e.time : 0
-                        return ctx.gcode(
-                            'RUN_SHELL_COMMAND CMD=ace_rpc PARAMS="panel-status"')
+                if (Date.now() < skipGcodeUntil) {
+                    online = false
+                    return
+                }
+                var beforeUnix = lastDbUnix
+                rpcInFlight = true
+                return ctx.gcode(
+                    'RUN_SHELL_COMMAND CMD=ace_rpc PARAMS="panel-status"')
+                    .then(function () {
+                        return pollDbUpdated(ctx, beforeUnix, Date.now() + 20000)
                     })
-                    .then(function () { return pollStore(ctx, t0, Date.now() + 15000) })
-                    .then(function (j) { applyStatus(j.status || {}, j.error); online = !!ace })
+                    .then(function () {
+                        online = !!ace
+                        if (aceUnreachable(err))
+                            skipGcodeUntil = Date.now() + 300000
+                    })
                     // keep any last-known state from the stale db mirror
-                    .catch(function (e) { online = false; if (!err) err = e.message || String(e) })
+                    .catch(function (e) {
+                        online = false
+                        if (!err) err = e.message || String(e)
+                        if (aceUnreachable(err)) skipGcodeUntil = Date.now() + 300000
+                    })
             })
         }).then(function () {
             busy = false
+            rpcInFlight = false
             renderFn && renderFn()
             publishLanes(ctx)
-        })
-    }
-
-    function pollStore(ctx, t0, deadline) {
-        return ctx.apiGet('/server/gcode_store?count=100').then(function (r) {
-            var txt = '', started = false, depth = 0
-            var entries = (r.result.gcode_store || []).filter(function (e) {
-                return e.time > t0 && e.type === 'response'
-            })
-            for (var i = 0; i < entries.length; i++) {
-                var lines = entries[i].message.split('\n')
-                for (var k = 0; k < lines.length; k++) {
-                    var line = lines[k].replace(/^\/\/\s?/, '')
-                    if (!started) {
-                        if (!line.trim().startsWith('{')) continue
-                        started = true
-                    }
-                    txt += line + '\n'
-                    depth += (line.match(/\{/g) || []).length -
-                        (line.match(/\}/g) || []).length
-                    if (started && depth <= 0) return JSON.parse(txt)
-                }
-            }
-            if (Date.now() > deadline) throw new Error('No reply from the ACE addon')
-            return new Promise(function (res) { setTimeout(res, 700) })
-                .then(function () { return pollStore(ctx, t0, deadline) })
         })
     }
 
@@ -626,6 +631,7 @@
             // Re-render only on change - a rebuild stomps half-typed inputs.
             var lastPoll = ''
             function lightPoll() {
+                if (busy || rpcInFlight) return
                 var was = printing
                 queryPrinter(ctx).then(function () {
                     if (was !== printing && !printing) { refresh(ctx); return }

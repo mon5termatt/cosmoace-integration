@@ -28,6 +28,29 @@ The keep-alive and the CLI both take an exclusive `flock` on the tty, so they
 can never interleave bytes inside a frame. If a command holds the port, that
 keep-alive tick is skipped — the command is feeding the watchdog itself.
 
+### Keep-alive must drain replies and not hammer `stty`
+
+Write-only `get_status` every 2s is enough for the 3.5s watchdog, but leaving
+the CDC replies unread and re-running `stty` every tick can wedge the ACE after
+a few minutes. The kernel then logs `error -71` / `error -110` and the ACE
+stays gone until it is power-cycled — unplugging nothing on the PC side will
+bring it back. Keep-alive therefore:
+
+- drains unread bytes after each frame (no parse)
+- runs `stty` once per USB re-enumerate, not every tick
+- forces `power/control=on` up the USB tree (no autosuspend)
+- wraps each tick in `timeout 1` so a stuck tty cannot stall the loop
+- is single-instance (reinstall used to stack extra `/bin/sh` copies)
+
+### Panel status must not block the gcode queue
+
+`[gcode_shell_command ace_rpc]` is synchronous with a 180s timeout, so a
+stuck USB open used to park `G28` behind a dead ACE. `panel-status` therefore
+forks the refresh and returns immediately; the panel polls the moonraker db
+cache that `--compact` writes. One refresh at a time (`flock`), and the panel
+backs off gcode kicks for 5 minutes after a USB I/O error. The CLI also fails
+fast on `EIO` / open timeout so real macros cannot hold the queue either.
+
 ## Two ACEs: hub pass-through, not a protocol relay
 
 Chaining a second ACE into the first one's spare USB port is a plain **USB hub

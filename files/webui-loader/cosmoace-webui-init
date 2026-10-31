@@ -39,8 +39,10 @@ write_manifest() {
         for d in "$ADD"/panels/*/; do
             [ -f "${d}panel.js" ] || continue
             n="$(basename "$d")"
+            # Bust browser cache when panel.js changes (mtime).
+            bust=$(date -r "${d}panel.js" +%s 2>/dev/null || date +%s)
             [ "$first" = 1 ] || printf ', '
-            printf '{"name": "%s", "script": "/addons/panels/%s/panel.js"}' "$n" "$n"
+            printf '{"name": "%s", "script": "/addons/panels/%s/panel.js?_=%s"}' "$n" "$n" "$bust"
             first=0
         done
         printf ']}\n'
